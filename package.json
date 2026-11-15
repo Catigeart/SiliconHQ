@@ -1,0 +1,26 @@
+{
+  "name": "llm-coder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "llm-coder": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "check": "tsc --noEmit",
+    "start": "node dist/cli.js",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "^0.169.0",
+    "zod": "^4.6.7"
+  }
+}
