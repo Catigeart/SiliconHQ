@@ -1,6 +1,6 @@
 import { developerFeedbackRole, plannerSummaryRole } from './closeout.js';
-import { plannerRole } from './planner.js';
 import { developerRole } from './developer.js';
+import { plannerRole } from './planner.js';
 import { reviewerRole } from './reviewer.js';
 import type { RoleDefinition, RoleName, RunPurpose } from './types.js';
 

@@ -7,7 +7,13 @@ export const implementationSchema = z.strictObject({
   summary: text,
   outcome: z.enum(['implemented', 'incomplete']),
   changes: z.array(z.strictObject({ path: text, description: text })),
-  validations: z.array(z.strictObject({ command: text, result: z.enum(['passed', 'failed', 'not_run']), evidence: text })),
+  validations: z.array(
+    z.strictObject({
+      command: text,
+      result: z.enum(['passed', 'failed', 'not_run']),
+      evidence: text,
+    }),
+  ),
   remaining: z.array(text),
 });
 export const implementationOutputSchema = z.toJSONSchema(implementationSchema);
@@ -29,8 +35,8 @@ export const developerRole: RoleDefinition = {
   label: '实现报告（尚未独立验收）',
   sandboxMode: 'workspace-write',
   outputSchema: implementationOutputSchema,
-  buildPrompt: context => developerPrompt(context.snapshot, context.instruction),
-  parseResult: answer => {
+  buildPrompt: (context) => developerPrompt(context.snapshot, context.instruction),
+  parseResult: (answer) => {
     const report = implementationSchema.parse(JSON.parse(answer));
     return { artifact: report, outcome: report.outcome };
   },

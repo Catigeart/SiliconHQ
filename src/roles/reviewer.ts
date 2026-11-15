@@ -6,9 +6,31 @@ const text = z.string().trim().min(1);
 export const reviewSchema = z.strictObject({
   verdict: z.enum(['passed', 'changes_requested', 'blocked']),
   summary: text,
-  criteria: z.array(z.strictObject({ criterion: text, result: z.enum(['passed','failed','not_verified']), evidence: text })).min(1),
-  findings: z.array(z.strictObject({ severity: z.enum(['high','medium','low']), location: text, problem: text, evidence: text, requestedChange: text })),
-  checks: z.array(z.strictObject({ command: text, result: z.enum(['passed','failed','not_run']), evidence: text })),
+  criteria: z
+    .array(
+      z.strictObject({
+        criterion: text,
+        result: z.enum(['passed', 'failed', 'not_verified']),
+        evidence: text,
+      }),
+    )
+    .min(1),
+  findings: z.array(
+    z.strictObject({
+      severity: z.enum(['high', 'medium', 'low']),
+      location: text,
+      problem: text,
+      evidence: text,
+      requestedChange: text,
+    }),
+  ),
+  checks: z.array(
+    z.strictObject({
+      command: text,
+      result: z.enum(['passed', 'failed', 'not_run']),
+      evidence: text,
+    }),
+  ),
   limitations: z.array(text),
 });
 export const reviewOutputSchema = z.toJSONSchema(reviewSchema);
@@ -26,10 +48,21 @@ export function validateReview(answer: string, inputSnapshot: unknown) {
   const report = reviewSchema.parse(JSON.parse(answer));
   const snapshot = reviewSnapshotSchema.parse(inputSnapshot);
   const expected = [...snapshot.planSnapshot.plan.acceptanceCriteria].sort();
-  const actual = report.criteria.map(item=>item.criterion).sort();
-  if (JSON.stringify(expected)!==JSON.stringify(actual)) throw new Error('检查报告未完整覆盖计划验收标准');
-  if (report.verdict==='passed' && (report.criteria.some(item=>item.result!=='passed') || report.findings.length || report.checks.some(item=>item.result!=='passed'))) throw new Error('检查报告的通过结论与证据状态矛盾');
-  if (report.verdict==='blocked' && (report.criteria.some(item=>item.result==='failed') || report.findings.length)) throw new Error('已有明确缺陷，应返回 changes_requested');
+  const actual = report.criteria.map((item) => item.criterion).sort();
+  if (JSON.stringify(expected) !== JSON.stringify(actual))
+    throw new Error('检查报告未完整覆盖计划验收标准');
+  if (
+    report.verdict === 'passed' &&
+    (report.criteria.some((item) => item.result !== 'passed') ||
+      report.findings.length ||
+      report.checks.some((item) => item.result !== 'passed'))
+  )
+    throw new Error('检查报告的通过结论与证据状态矛盾');
+  if (
+    report.verdict === 'blocked' &&
+    (report.criteria.some((item) => item.result === 'failed') || report.findings.length)
+  )
+    throw new Error('已有明确缺陷，应返回 changes_requested');
   return report;
 }
 
@@ -40,7 +73,7 @@ export const reviewerRole: RoleDefinition = {
   label: '检查报告',
   sandboxMode: 'read-only',
   outputSchema: reviewOutputSchema,
-  buildPrompt: context => reviewerPrompt(context.snapshot, context.git, context.instruction),
+  buildPrompt: (context) => reviewerPrompt(context.snapshot, context.git, context.instruction),
   parseResult: (answer, context) => {
     const report = validateReview(answer, context.snapshot);
     return { artifact: report, verdict: report.verdict };

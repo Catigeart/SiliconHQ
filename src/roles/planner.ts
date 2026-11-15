@@ -4,7 +4,9 @@ import type { RoleDefinition } from './types.js';
 const text = z.string().trim().min(1);
 export const planSchema = z.strictObject({
   goal: text,
-  steps: z.array(z.strictObject({ description: text, files: z.array(text), validation: text })).min(1),
+  steps: z
+    .array(z.strictObject({ description: text, files: z.array(text), validation: text }))
+    .min(1),
   acceptanceCriteria: z.array(text).min(1),
   risks: z.array(text),
 });
@@ -18,6 +20,6 @@ export const plannerRole: RoleDefinition = {
   label: '计划已校验',
   sandboxMode: 'read-only',
   outputSchema: plannerOutputSchema,
-  buildPrompt: context => plannerPrompt(context.instruction),
-  parseResult: answer => ({ artifact: planSchema.parse(JSON.parse(answer)) }),
+  buildPrompt: (context) => plannerPrompt(context.instruction),
+  parseResult: (answer) => ({ artifact: planSchema.parse(JSON.parse(answer)) }),
 };

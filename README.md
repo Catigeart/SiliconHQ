@@ -1,4 +1,4 @@
-# llm-coder
+# SiliconHQ
 
 用 TypeScript 编写的开发 Agent 命令入口，当前通过 Node 子进程启动本机 Codex CLI。
 
@@ -7,12 +7,12 @@
 在你想操作的项目目录中运行：
 
 ```bash
-llm-coder
-llm-coder "先分析这个项目的结构"
-llm-coder --help
-llm-coder --version
-llm-coder -C /path/to/project
-llm-coder resume --last
+sihq
+sihq "先分析这个项目的结构"
+sihq --help
+sihq --version
+sihq -C /path/to/project
+sihq resume --last
 ```
 
 裸命令打开 Codex 原生交互界面。除 `chat`、`run`、`plan`、`implement`、`review`、`workflow`、`list` 和自定义 `resume` 子命令外，参数原样转发，帮助和版本输出也来自 Codex。
@@ -20,10 +20,10 @@ llm-coder resume --last
 
 ## 持久对话入口
 
-在项目目录运行 `llm-coder chat`，一次启动后连续聊天和执行开发流程：
+在项目目录运行 `sihq chat`，一次启动后连续聊天和执行开发流程：
 
 ```text
-llm-coder · /root/my-project
+sihq · /root/my-project
 你 > 分析一下项目结构
 助手 > ……
 你 > /workflow 给项目加入配置文件支持
@@ -49,13 +49,13 @@ Ctrl+C 取消当前任务并返回输入提示。同一对话一次执行一个�
 流程失败会显示实际状态；如果流程结束后主对话汇报失败，仍可继续提问或查看状态。
 
 ```bash
-llm-coder chat list
-llm-coder chat resume <chat-id>
+sihq chat list
+sihq chat resume <chat-id>
 ```
 
 记录保存在 `~/.llm-coder/chats/<chat-id>/`：`chat.json` 保存工作目录、会话 ID、模型、关联流程和近期消息，`events.jsonl` 保存完整事件。
 恢复对话沿用原目录、模型和 Codex 会话。中断的开发流程需显式输入 `/resume <workflow-id>` 继续。
-主对话与各角色各自维护会话，通过流程报告交接上下文。裸命令 `llm-coder` 仍打开 Codex 原生界面。
+主对话与各角色各自维护会话，通过流程报告交接上下文。裸命令 `sihq` 仍打开 Codex 原生界面。
 
 实现：`src/chat/repl.ts` 管理输入和取消，`src/chat/session.ts` 处理对话与流程交接，`src/storage/chats.ts` 保存记录。
 `tests/chat.test.mjs` 使用模拟 Codex 子进程验证连续对话、流程交接、恢复、汇报失败、输入错误、会话锁和取消。
@@ -81,8 +81,8 @@ const child = spawn("codex", process.argv.slice(2), {
 - 父进程收到 SIGINT、SIGTERM 或 SIGHUP 时会转发给子进程。
 
 ```text
-llm-coder
-  → /usr/local/bin/llm-coder（符号链接）
+sihq
+  → /usr/local/bin/sihq（符号链接）
   → dist/cli.js（TypeScript 编译产物，由 Node 运行）
   → spawn("codex", 参数, { stdio: "inherit" })
   → Codex 原生交互界面
@@ -90,33 +90,48 @@ llm-coder
 
 原生交互入口使用 Node 子进程；`run` 子命令使用 Codex SDK。
 
-## 开发与安装
+## 编译与安装
 
-依赖：Node.js 22 或更高版本、npm，以及 PATH 中可用的 Codex CLI。
-
-```bash
-cd /root/llm-coder-workspace/llm-coder
-npm ci
-npm run build
-```
-
-本机命令链接指向 `dist/cli.js`。修改 `src/cli.ts` 后，重新执行 `npm run build` 即可生效。
-在尚未安装入口的机器上，可以构建后执行 `npm link` 安装命令链接。
-
-不安装全局入口也可以运行：
+依赖：Node.js 22 或更高版本、npm。运行时还需要 PATH 中可用且已配置的 Codex CLI。
+以下脚本适用于 Bash 环境（Linux/macOS），可从任意工作目录调用。
 
 ```bash
-node dist/cli.js --version
-npm start -- --help
+cd /path/to/SiliconHQ
+./scripts/build.sh
+./scripts/install.sh
+export PATH="$HOME/.local/bin:$PATH"
+sihq kernel --help
 ```
 
-`npm run check` 执行 TypeScript 类型检查。已支持三角色串行调度及有限修复循环。
+`build.sh` 使用锁文件执行 `npm ci --include=dev`，编译 TypeScript，生成
+`build/siliconhq-<版本>.tgz`。`install.sh` 先执行完整构建，再将安装包安装到
+`~/.local`，提供 `~/.local/bin/sihq`；安装后不依赖源码目录，配置文件也随包安装。
+将上述 PATH 设置加入 shell 启动文件可永久生效。
+
+自定义安装前缀或安装已构建的包：
+
+```bash
+./scripts/install.sh --prefix /path/to/prefix
+npm install --global --prefix "$HOME/.local" ./build/siliconhq-0.1.0.tgz
+npm uninstall --global --prefix "$HOME/.local" siliconhq
+```
+
+安装前缀需有写权限。升级时重新运行安装脚本。旧的 `llm-coder` 命令不会自动删除，
+确认新入口可用后，可用原安装方式卸载旧包（例如 `npm uninstall -g llm-coder`）。
+
+开发期间可使用 `npm ci`、`npm run build`、`npm run check` 和 `npm test`。
+不安装也可以运行 `node dist/cli.js` 或 `npm start -- --help`。
+`npm pack` 会自动编译；`sihq --help` 和 `sihq --version` 仍沿用原生 Codex 转发行为。
+
+角色配置优先读取工作目录中的 `sihq.config.json`，兼容旧的 `llm-coder.config.json`，
+最后读取安装包自带的默认配置。历史运行、对话、工作流及锁仍保存在 `~/.llm-coder/`，
+以便升级后继续恢复，并保持与旧版的任务锁互斥。
 
 ## 通过程序执行任务
 
 ```bash
-llm-coder run "分析当前项目结构，不修改文件"
-llm-coder run "分析当前项目结构，不修改文件" > result.txt
+sihq run "分析当前项目结构，不修改文件"
+sihq run "分析当前项目结构，不修改文件" > result.txt
 ```
 
 任务描述必须作为一个参数（用引号包裹）。当前 `run` 不接受额外选项。
@@ -134,9 +149,9 @@ llm-coder run "分析当前项目结构，不修改文件" > result.txt
 ## 运行记录和恢复
 
 ```bash
-llm-coder run "分析项目，提出改进方案"
-llm-coder list
-llm-coder resume <run-id> "继续实现第一项改进"
+sihq run "分析项目，提出改进方案"
+sihq list
+sihq resume <run-id> "继续实现第一项改进"
 ```
 
 记录保存在 `~/.llm-coder/runs/<run-id>/`：
@@ -150,13 +165,13 @@ llm-coder resume <run-id> "继续实现第一项改进"
 历史事件保留，`run.json` 状态代表最近一轮。强制杀进程可能留下 running 状态和锁；
 恢复时检查锁中的进程，已结束则允许恢复。不要在不同主机间共享这一进程锁目录。
 
-`llm-coder resume --last` 仍转发给 Codex 原生界面；自定义恢复必须使用 run-id 和后续指令。
+`sihq resume --last` 仍转发给 Codex 原生界面；自定义恢复必须使用 run-id 和后续指令。
 
 ## 生成开发计划
 
 ```bash
-llm-coder plan "给项目加入配置文件支持"
-llm-coder resume <plan-run-id> "缩小范围，只处理第一项需求"
+sihq plan "给项目加入配置文件支持"
+sihq resume <plan-run-id> "缩小范围，只处理第一项需求"
 ```
 
 planner 使用 Codex 的 read-only 沙箱和 never 审批策略：不能通过审批升级写权限。
@@ -167,7 +182,7 @@ planner 使用 Codex 的 read-only 沙箱和 never 审批策略：不能通过�
 若修订失败，plan.json 可能仍是上一轮成功版本，使用前应确认 run.json 状态。
 结构校验保证格式完整，计划内容是否合理仍需审查。
 
-模型和思考强度配置在 `llm-coder.config.json`，由 `src/config/roles.ts` 统一读取和校验：
+模型和思考强度配置在 `sihq.config.json`，由 `src/config/roles.ts` 统一读取和校验：
 
 ```json
 {
@@ -179,7 +194,7 @@ planner 使用 Codex 的 read-only 沙箱和 never 审批策略：不能通过�
 }
 ```
 
-优先使用任务工作目录下的同名配置，否则使用本工具根目录配置；不逐字段合并。
+优先使用任务工作目录的 sihq.config.json，其次兼容 llm-coder.config.json，否则使用本工具根目录配置；不逐字段合并。
 配置必须包含三个角色及各自的 model，reasoningEffort 可省略，创建新任务时默认为 medium。
 支持当前 SDK 的 minimal、low、medium、high、xhigh、max、ultra、persistent 枚举；
 具体模型是否接受该档位由 Codex 判断。例如可把 planner 改为 high，同时保留 developer 为 medium。
@@ -193,8 +208,8 @@ modelReasoningEffort。恢复与修复沿用运行记录，不重新读取角色
 ## 按计划实现
 
 ```bash
-llm-coder implement <plan-run-id>
-llm-coder resume <implementation-run-id> "继续完成剩余工作"
+sihq implement <plan-run-id>
+sihq resume <implementation-run-id> "继续完成剩余工作"
 ```
 
 只接受状态为 completed 的 planner 记录，并再次校验 plan.json。
@@ -216,8 +231,8 @@ incomplete 返回退出码 1，list 会显示 completed/incomplete。恢复失�
 ## Terra 独立检查
 
 ```bash
-llm-coder review <implementation-run-id>
-llm-coder resume <review-run-id> "重新检查此前受阻的验收项"
+sihq review <implementation-run-id>
+sihq resume <review-run-id> "重新检查此前受阻的验收项"
 ```
 
 review 接受 completed 的 developer 任务（包括 incomplete 报告），创建全新 terra 会话，
@@ -236,17 +251,17 @@ review 接受 completed 的 developer 任务（包括 incomplete 报告），创
 
 检查对象是当前工作区，而非冻结的提交；请避免检查期间修改该目录。
 修复后建议重新 review 原实现任务，创建新的独立检查；旧检查结果不会自动失效。
-带参数的 Codex 原生 review 可直接用 `codex review ...`；llm-coder review 现在专用于任务 ID。
+带参数的 Codex 原生 review 可直接用 `codex review ...`；sihq review 现在专用于任务 ID。
 独立 review 仅报告结果；workflow 会按下述规则将问题交回 sol。
 
 ## 自动开发流程
 
 ```bash
-llm-coder workflow "实现一个功能并补充测试"
-llm-coder workflow "不自动修复，检查失败后生成说明" --max-repairs 0
-llm-coder workflow list
-llm-coder workflow status <workflow-id>
-llm-coder workflow resume <workflow-id>
+sihq workflow "实现一个功能并补充测试"
+sihq workflow "不自动修复，检查失败后生成说明" --max-repairs 0
+sihq workflow list
+sihq workflow status <workflow-id>
+sihq workflow resume <workflow-id>
 ```
 
 默认流程为 astra 计划 → sol 实现 → terra 检查。只有 terra 给出 passed 才成功退出。
@@ -312,7 +327,7 @@ blocked 流程显式 resume 会在原 terra 会话中重新检查，适合环境
 - `src/storage/workflows.ts`：流程记录。
 - `tests/workflow.test.mjs`：正常串行、阶段失败、blocked、工作区锁、有限修复，以及会话恢复、产物修复、检查点补齐和预算保持。
 
-真实 demo 位于 `/root/llm-coder-workspace/workflow-demo-verified`。
+真实 demo 位于 `/root/SiliconHQ-workspace/workflow-demo-verified`。
 首次 demo 暴露了未跟踪文件缺少内容基线的问题；因此补充了 SHA-256，供 terra 独立核对既有文件。
 
 三个角色文件遵循同一约定：声明输出 schema、纯提示词函数和 RoleDefinition。
@@ -346,7 +361,7 @@ planner 同时收到这份分析和最后 review，输出面向用户的中文�
 - `workflow.json` 中的 developerFeedbackRunId、finalSummaryRunId 和 summaryFile：收尾任务及产物索引。
 
 收尾任务目录保存 developer-feedback.json / final-summary.json，以及各自的输入快照。
-可以通过 `llm-coder workflow status <id>` 找到这些记录。
+可以通过 `sihq workflow status <id>` 找到这些记录。
 
 收尾模型调用失败时，流程为 failed，stopReason 为 closeout_failed；failureReason 仍记录原来的
 repair_budget_exhausted，最后 review 也会保留。运行 `workflow resume <id>` 只继续未完成的收尾阶段，
@@ -359,7 +374,7 @@ blocked 和其他阶段的执行异常仍按原逻辑停止，不进入这条专
 ## 同一工作方向连续迭代
 
 ```bash
-llm-coder workflow continue <workflow-id> "再支持环境变量覆盖配置"
+sihq workflow continue <workflow-id> "再支持环境变量覆盖配置"
 ```
 
 在聊天中使用 `/continue <workflow-id> 再支持环境变量覆盖配置`。`/resume` 继续当前轮次；`/continue` 创建下一轮需求。
@@ -399,16 +414,16 @@ workflow ID 保持不变；`round` 表示当前轮次，`rounds` 保存已结束
 这里记录的是请求档位，不承诺服务端实际采用的档位或加速比例。
 
 ```bash
-llm-coder workflow "实现配置文件支持" --fast
-llm-coder workflow continue <workflow-id> "支持环境变量" --no-fast
-llm-coder workflow resume <workflow-id> --no-fast
-llm-coder plan "分析需求" --fast
-llm-coder implement <plan-id> --no-fast
-llm-coder review <implementation-id> --fast
-llm-coder run "分析目录" --no-fast
-llm-coder resume <run-id> "继续" --fast
-llm-coder chat --no-fast
-llm-coder chat resume <chat-id> --fast
+sihq workflow "实现配置文件支持" --fast
+sihq workflow continue <workflow-id> "支持环境变量" --no-fast
+sihq workflow resume <workflow-id> --no-fast
+sihq plan "分析需求" --fast
+sihq implement <plan-id> --no-fast
+sihq review <implementation-id> --fast
+sihq run "分析目录" --no-fast
+sihq resume <run-id> "继续" --fast
+sihq chat --no-fast
+sihq chat resume <chat-id> --fast
 ```
 
 执行命令的参数覆盖角色配置；workflow 参数作用于该轮所有角色，包括修复与失败收尾。
@@ -425,7 +440,7 @@ llm-coder chat resume <chat-id> --fast
 聊天选项放在需求前，continue/resume 放在 ID 后。需求正文内的 `--fast` 不会被误当成选项。
 CLI 可以用 `--` 结束选项解析；聊天需求以选项字面量开头时也可用 `--` 分隔。
 同时指定 `--fast` 与 `--no-fast` 会报错；list/status 查询命令不接受速度参数。
-裸命令与原生 Codex 参数转发行为保持不变，以上选项用于 llm-coder 自己的执行子命令。
+裸命令与原生 Codex 参数转发行为保持不变，以上选项用于 sihq 自己的执行子命令。
 
 ## 有预算的 kernel 优化任务
 
@@ -434,11 +449,11 @@ CLI 可以用 `--` 结束选项解析；聊天需求以选项字面量开头时�
 
 ```bash
 # 后台运行。默认 full：六种 nb，性能仅块数 4，核心 lower/nonunit。
-llm-coder kernel start /root/gpuhpc-workspace/gpuhpc-trtri \
+sihq kernel start /root/gpuhpc-workspace/gpuhpc-trtri \
   --experiments 2 --seconds 3600 --calls 16 --tokens 1000000 --stage-seconds 600
 
 # 小规模编排验证，仅 nb=32；不能作为完整规模验收。
-llm-coder kernel start /root/gpuhpc-workspace/gpuhpc-trtri \
+sihq kernel start /root/gpuhpc-workspace/gpuhpc-trtri \
   --smoke --experiments 1 --seconds 900 --stage-seconds 180 --no-fast \
   --objective "验证编排，保持算法不变，只整理注释，最后停止"
 ```
@@ -446,9 +461,9 @@ llm-coder kernel start /root/gpuhpc-workspace/gpuhpc-trtri \
 正式实验可以只限制实验时间：
 
 ```bash
-llm-coder kernel start /root/gpuhpc-workspace/gpuhpc-trtri --time-only --seconds 28800
+sihq kernel start /root/gpuhpc-workspace/gpuhpc-trtri --time-only --seconds 28800
 # 所有预算均不限，由 planner 决策或人工停止
-llm-coder kernel start /root/gpuhpc-workspace/gpuhpc-trtri --time-only --seconds unlimited
+sihq kernel start /root/gpuhpc-workspace/gpuhpc-trtri --time-only --seconds unlimited
 ```
 
 `--time-only` 取消轮数、调用、token、单阶段时间和阶段尝试次数上限；不接受这些预算的有限值。
@@ -462,14 +477,14 @@ refactorer 使用 developer 的配置，但维护独立会话，避免与实现�
 planner 的计划与最终决策共用 planner 会话。长时间上下文由 Codex 管理，恢复的事实依据仍是归档文件。
 
 ```bash
-llm-coder kernel list
-llm-coder kernel status <id>
-llm-coder kernel experiments <id>
-llm-coder kernel logs <id> --follow
-llm-coder kernel pause <id>
-llm-coder kernel stop <id>
-llm-coder kernel resume <id>
-llm-coder kernel steer <id> "下一轮优先研究 nb=512 的 warp 分工"
+sihq kernel list
+sihq kernel status <id>
+sihq kernel experiments <id>
+sihq kernel logs <id> --follow
+sihq kernel pause <id>
+sihq kernel stop <id>
+sihq kernel resume <id>
+sihq kernel steer <id> "下一轮优先研究 nb=512 的 warp 分工"
 ```
 
 - `pause`：当前阶段完成后暂停；worker 的状态最终变为 paused 才表示已暂停。
@@ -604,7 +619,7 @@ full 有 4 工具 × 6 nb = 24 次工具进程，合计 84 个用例执行；smo
 
 ### Kernel 研究调度与阅读入口
 
-`llm-coder kernel report <id>` 在任务空闲时生成/更新 `INDEX.md`、`FAMILY.md` 及每轮 `EXPERIMENT.md`。历史文档明确标注“根据既有记录整理”，不新增实验结论。新归档自动生成文档，planner 的 `interpretation`、`uncertainties`、保留理由与下一步直接进入说明；客观数字、实际执行/复用情况由控制器填写。历史任务恢复时保留已冻结阶段，下一次新规划使用新调度协议。
+`sihq kernel report <id>` 在任务空闲时生成/更新 `INDEX.md`、`FAMILY.md` 及每轮 `EXPERIMENT.md`。历史文档明确标注“根据既有记录整理”，不新增实验结论。新归档自动生成文档，planner 的 `interpretation`、`uncertainties`、保留理由与下一步直接进入说明；客观数字、实际执行/复用情况由控制器填写。历史任务恢复时保留已冻结阶段，下一次新规划使用新调度协议。
 
 planner 的任务分为：
 
@@ -617,9 +632,9 @@ planner 的任务分为：
 空闲任务也可以手动诊断，结果放在 `manual-diagnostics/`，不自动恢复研究或改写模型决策：
 
 ```sh
-llm-coder kernel diagnose <id> codegen 20,21 --sizes 128 --repeats 1
-llm-coder kernel diagnose <id> kernels 21 --sizes 32,128,1024 --repeats 3
-llm-coder kernel diagnose <id> paired 20,21 --sizes 128,512 --repeats 3
+sihq kernel diagnose <id> codegen 20,21 --sizes 128 --repeats 1
+sihq kernel diagnose <id> kernels 21 --sizes 32,128,1024 --repeats 3
+sihq kernel diagnose <id> paired 20,21 --sizes 128,512 --repeats 3
 ```
 
 逐 kernel 使用 NCU kernel replay、base 时钟、cache-control all，profile-from-start off，只采集专用入口的一次调用；它与整体 range 测量的缓存/replay 条件不同，不能拿各 kernel 耗时直接替代整体性能结论。当前报告给出真实 kernel 名称与几何，不猜测每个 cuBLAS 内核对应的数学阶段。代码体积采用 SASS 指令地址范围（包含 padding），不是独立 ELF section 大小。
@@ -638,10 +653,10 @@ llm-coder kernel diagnose <id> paired 20,21 --sizes 128,512 --repeats 3
 新 kernel 任务默认 `--research-mode algorithm-exploration`；迁移到目标 GPU 后可以使用 `--research-mode platform-tuning`。已有任务只有显式切换才启用研究问题校验，不改写历史计划或冻结的测试契约。
 
 ```sh
-llm-coder kernel pause <id>
+sihq kernel pause <id>
 # 等 status=paused 后，切换研究模式；不重置时间/调用预算或角色配置。
-llm-coder kernel research-mode <id> algorithm-exploration
-llm-coder kernel resume <id>
+sihq kernel research-mode <id> algorithm-exploration
+sihq kernel resume <id>
 ```
 
 `research-mode` 只允许空闲的 paused/ready/blocked 任务使用。若当前轮已开始实现或验证，则从下一轮规划生效；停在 plan/baseline 时从本轮生效。
@@ -655,3 +670,18 @@ llm-coder kernel resume <id>
 新增只读任务 `task=finalize_family`，可直接选择同族已归档且通过匹配源码 full 数值/审阅的代表，提交 `finalization`（结束依据、代表及 `portingGuide`），由控制器逐个运行/复用 sanitizer，随后交 planner 总结。该路径不会制造新代码候选、不会重复开发/重构，也不会改变开发父方案。一个代表失败就不能将算法族标为完成；环境失败保存断点。算法族完成后，应提出新的结构问题，目标平台调参事项保留在移植说明中。
 
 算法族最终反馈必须返回 `familyAction: "close" | "keep_open"`。它与控制整个任务的 `action`、表达研究结论的 `questionOutcome` 独立：例如 `action=continue`、`familyAction=close`、`questionOutcome.status=deferred` 表示结束当前算法族、将未验证问题留待以后，同时继续其他研究。实现轮收尾与归档代表收尾使用同一校验；任何代表未通过时都不能 close。缺少该字段的旧断点决策会反馈给 planner 修正，不通过猜测 action 来迁移，也不会因此重跑开发或验证。
+
+
+## 内部模块与重构验证
+
+- `src/commands/`：纯参数解析与 chat、workflow、task 命令处理；原生 Codex 转发由入口保留。
+- `src/storage/files.ts`：统一数据目录、文件锁、原子写入与带校验的 JSON 读取；各 Store 保留业务规则。
+- `src/storage/schemas.ts`：运行、对话和工作流的磁盘记录校验。
+- `src/kernel/runtime.ts`：信号、心跳、时间预算与资源清理。
+- `src/kernel/model-executor.ts`：模型重试、源码约束和缓存复用；`artifacts.ts` 校验缓存模型报告和验证证据。
+- `src/kernel/stages/`：每个实验阶段的处理器；runner 负责阶段调度与结束状态。
+- `src/kernel/state-schema.ts`：kernel 状态格式校验。无版本旧记录按 v0 读取并迁移到 v1，下次保存落盘；未知版本拒绝恢复。
+- `src/workflow/runner.ts`：支持注入 RunStore、WorkflowStore 和任务执行器；恢复策略单独判断是否复用已完成执行。
+
+`npm run format` 统一源码和测试格式，`npm run format:check` 检查格式。
+运行 `npm run check` 和 `npm test` 验证类型及行为。`tests/refactor.test.mjs` 覆盖清理失败、记录迁移、缓存损坏、命令解析与注入式恢复测试；kernel 原有测试覆盖预算、暂停恢复和算法族验证。
