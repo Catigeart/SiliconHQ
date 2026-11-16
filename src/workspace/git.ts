@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { lstatSync, readFileSync, readlinkSync, readdirSync } from 'node:fs';
+import { join, relative } from 'node:path';
 
 export function captureGit(cwd: string): unknown {
   const inspect = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
@@ -62,4 +62,36 @@ export function captureGit(cwd: string): unknown {
     files,
     filesTruncated: paths.length > files.length,
   };
+}
+
+// A non-Git workspace still needs a real fingerprint for crash recovery.
+// Dependency/cache directories are outside this source snapshot contract.
+export function captureWorkspace(cwd: string): unknown {
+  const git = captureGit(cwd) as any;
+  if (
+    git.available &&
+    !git.filesTruncated &&
+    !git.files.some((file: any) => file.skipped || file.error)
+  )
+    return { head: git.head, status: git.status, files: git.files };
+  const files: Record<string, string> = {};
+  let bytes = 0;
+  const walk = (directory: string) => {
+    for (const name of readdirSync(directory).sort()) {
+      if (['.git', 'node_modules', '.llm-coder', '.cache', '__pycache__'].includes(name)) continue;
+      const path = join(directory, name),
+        stat = lstatSync(path),
+        key = relative(cwd, path);
+      if (stat.isSymbolicLink()) files[key] = 'symlink:' + readlinkSync(path);
+      else if (stat.isDirectory()) walk(path);
+      else if (stat.isFile()) {
+        bytes += stat.size;
+        if (bytes > 256 * 1024 * 1024 || Object.keys(files).length >= 10000)
+          throw new Error('工作目录超出完整源码指纹范围，请在更具体的项目目录执行');
+        files[key] = createHash('sha256').update(readFileSync(path)).digest('hex');
+      } else throw new Error('工作目录包含无法核对的特殊文件：' + key);
+    }
+  };
+  walk(cwd);
+  return { files };
 }

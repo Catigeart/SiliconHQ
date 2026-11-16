@@ -11,6 +11,7 @@ import {
   recordDirectory,
 } from './files.js';
 import { chatRecordSchema } from './schemas.js';
+import { Journal } from '../runtime/journal.js';
 
 export type Chat = {
   speed?: Speed;
@@ -24,6 +25,7 @@ export type Chat = {
   workflowIds: string[];
   latestWorkflowId?: string;
   recentMessages: { role: 'user' | 'assistant'; text: string }[];
+  pendingTurn?: { id: string; text: string; internal: boolean };
 };
 export class ChatStore {
   constructor(readonly root = dataDirectory('chats')) {}
@@ -49,10 +51,12 @@ export class ChatStore {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chat.updatedAt = new Date().toISOString();
     const path = join(dir, 'chat.json');
-    atomicJson(path, chat);
+    new Journal(dir).checkpoint('chat.json', chat);
   }
   read(id: string): Chat {
-    const chat = readValidatedJson(join(this.directory(id), 'chat.json'), chatRecordSchema) as Chat;
+    const chat = chatRecordSchema.parse(
+      new Journal(this.directory(id)).readCheckpoint('chat.json'),
+    ) as Chat;
     if (
       chat.id !== id ||
       typeof chat.cwd !== 'string' ||

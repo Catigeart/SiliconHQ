@@ -20,6 +20,9 @@ import {
   recordDirectory,
 } from '../storage/files.js';
 import { parseKernelState } from './state-schema.js';
+import { Journal } from '../runtime/journal.js';
+import type { Failure } from '../runtime/faults.js';
+import type { ProcessIdentity } from '../runtime/identity.js';
 
 import { type Budget } from './budget-schema.js';
 export { budgetSchema, type Budget } from './budget-schema.js';
@@ -41,11 +44,17 @@ export type Stage =
   | 'archive_family_decide'
   | 'closeout';
 export type State = {
+  researchConfig?: import('./research-config.js').ResearchConfig;
   schemaVersion?: 1;
   researchMode?: 'algorithm-exploration' | 'platform-tuning';
   researchPolicyStart?: number;
   networkRetry?: { windowSeconds: number; maxDelaySeconds: number };
   networkFailures?: Record<string, { count: number; startedAt: number; lastError: string }>;
+  activeOperationId?: string;
+  activity?: { kind: string; since: number; detail: string };
+  failure?: Failure;
+  workerIdentity?: ProcessIdentity;
+  accountedTurns?: string[];
   sanitizerPolicy?: 'family-final-v1';
   performancePolicy?: 'ncu-base-v1' | 'ncu-base-pitched-v2';
   timeOnly?: boolean;
@@ -108,14 +117,22 @@ export class KernelStore {
     return recordDirectory(this.root, id);
   }
   read(id: string): State {
-    const state = readValidatedJson(join(this.dir(id), 'state.json'), { parse: parseKernelState });
+    const state = parseKernelState(this.journal(id).readCheckpoint('state.json'));
     if (state.id !== id) throw new Error('kernel 记录 ID 不匹配');
     return state;
   }
   save(s: State) {
     s.schemaVersion = 1;
     s.updatedAt = new Date().toISOString();
-    atomic(join(this.dir(s.id), 'state.json'), s);
+    const journal = this.journal(s.id);
+    journal.checkpoint(
+      'state.json',
+      s,
+      s.activeOperationId ? journal.operation(s.activeOperationId) : undefined,
+    );
+  }
+  journal(id: string) {
+    return new Journal(this.dir(id));
   }
   event(s: State, type: string, data: unknown = {}) {
     appendFileSync(

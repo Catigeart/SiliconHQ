@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { agent, closeoutSchema } from './agent.js';
-import { transient } from './budget.js';
+import { executeOperation } from '../runtime/executor.js';
+import { classify, outputError } from '../runtime/faults.js';
 import { KernelStore, atomic, copySource, manifest, readJson, type State } from './store.js';
 
 export async function finishCloseout(
@@ -84,45 +84,56 @@ export async function finishCloseout(
     let summary;
     if (existsSync(output)) summary = closeoutSchema.parse(readJson(output));
     else {
-      const retryStarted = Date.now();
-      let retries = 0;
-      for (;;) {
-        signal.throwIfAborted();
-        s.closeout.attempts++;
-        s.calls++;
-        store.save(s);
-        store.event(s, 'closeout.started', { attempt: s.closeout.attempts });
-        const context = readJson(contextFile);
-        try {
-          summary = closeoutSchema.parse(
-            await invoke(
+      const context = readJson(contextFile);
+      summary = closeoutSchema.parse(
+        await executeOperation({
+          journal: store.journal(s.id),
+          id: `closeout:${s.closeout.reason}:${s.closeout.experiment}`,
+          identity: { reason: s.closeout.reason, context, role: s.roles.planner, contract: 2 },
+          signal,
+          capture: () => manifest(join(root, 'baseline')),
+          readOnly: true,
+          policy: s.networkRetry
+            ? {
+                windowMs: s.networkRetry.windowSeconds * 1000,
+                maxDelayMs: s.networkRetry.maxDelaySeconds * 1000,
+              }
+            : undefined,
+          beforeAttempt() {
+            s.closeout!.attempts++;
+            s.calls++;
+            store.save(s);
+            store.event(s, 'closeout.started', { attempt: s.closeout!.attempts });
+          },
+          onEvent(type, data: any) {
+            if (data.operation) s.activeOperationId = data.operation;
+            store.event(s, type === 'execution.retry' ? 'closeout.retry' : type, data);
+            store.save(s);
+          },
+          validate(value) {
+            try {
+              const result = closeoutSchema.parse(value);
+              if (result.status !== s.closeout!.reason)
+                throw new Error('总结停止原因与现场记录不一致');
+              return result;
+            } catch (error) {
+              throw outputError(error);
+            }
+          },
+          invoke: (signal) =>
+            invoke(
               s,
               store,
               {
                 kind: 'closeout',
                 cwd: join(root, 'baseline'),
-                prompt: `${explanation}，优化轮次已取消。报告 status 必须为 ${s.closeout.reason}。只做现场记录与实验总结，不执行新实验。完整记录：${contextFile}。现场：${JSON.stringify({ ...context, results: context.results.slice(-8) })}`,
+                prompt: `${explanation}，优化轮次已取消。报告 status 必须为 ${s.closeout!.reason}。只做现场记录与实验总结，不执行新实验。完整记录：${contextFile}。现场：${JSON.stringify({ ...context, results: context.results.slice(-8) })}`,
                 output: join(root, 'closeout.events.jsonl'),
               },
               signal,
             ),
-          );
-          break;
-        } catch (error) {
-          if (
-            !transient(error) ||
-            signal.aborted ||
-            Date.now() - retryStarted >= (s.networkRetry?.windowSeconds ?? 600) * 1000
-          )
-            throw error;
-          const ms = Math.min(
-            (s.networkRetry?.maxDelaySeconds ?? 60) * 1000,
-            1000 * 2 ** Math.min(retries++, 6),
-          );
-          store.event(s, 'closeout.retry', { count: retries, delayMs: ms, error: String(error) });
-          await delay(ms, undefined, { signal });
-        }
-      }
+        }),
+      );
       signal.throwIfAborted();
       if (summary.status !== s.closeout.reason) throw new Error('总结停止原因与现场记录不一致');
       atomic(output, summary);
@@ -150,12 +161,30 @@ export async function finishCloseout(
     s.closeout.status = 'completed';
     delete s.closeout.error;
     delete s.error;
+    delete s.failure;
     s.status = stoppedByUser ? 'stopped' : 'budget_exhausted';
     store.save(s);
+    rmSync(join(root, 'summary-pending.json'), { force: true });
+    rmSync(join(root, 'summary-pending.txt'), { force: true });
     store.event(s, 'closeout.completed', { summary: output });
   } catch (error) {
     s.closeout.status = 'failed';
     s.closeout.error = String(error);
+    atomic(join(root, 'summary-pending.json'), {
+      plannerSummaryPending: true,
+      reason: s.closeout.reason,
+      contextFile,
+      experiment: s.closeout.experiment,
+      interruptedStage: s.closeout.stage,
+      completedExperiments: s.results.filter((item) => item.status !== 'cancelled').length,
+      failure: classify(error),
+      nextAction: `sihq kernel resume ${s.id}`,
+    });
+    writeFileSync(
+      join(root, 'summary-pending.txt'),
+      `${explanation}，当前轮次已取消，现场已保存。planner 总结尚未完成。\n现场：${contextFile}\n原因：${String(error)}\n恢复只会继续总结：sihq kernel resume ${s.id}\n`,
+      { mode: 0o600 },
+    );
     store.save(s);
     throw error;
   }

@@ -4,6 +4,7 @@ import { diagnose } from './diagnostics.js';
 import { sanitize } from './sanitizer.js';
 import { manifest } from './store.js';
 import { verify } from './verify.js';
+import { ExecutionError } from '../runtime/faults.js';
 
 export type Dependencies = {
   agent: typeof agent;
@@ -22,4 +23,8 @@ export function assertCandidate(path: string) {
   manifest(path);
 }
 
-export class PauseRequested extends Error {}
+export class PauseRequested extends ExecutionError {
+  constructor(message: string) {
+    super({ kind: 'cancelled', code: 'PAUSE_REQUESTED', message, action: 'stop' });
+  }
+}

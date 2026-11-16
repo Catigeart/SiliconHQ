@@ -88,11 +88,11 @@ sihq
   → Codex 原生交互界面
 ```
 
-原生交互入口使用 Node 子进程；`run` 子命令使用 Codex SDK。
+原生交互入口使用 Node 子进程；受管任务默认通过 Codex app-server 协议执行。
 
 ## 编译与安装
 
-依赖：Node.js 22 或更高版本、npm。运行时还需要 PATH 中可用且已配置的 Codex CLI。
+依赖：Node.js >=22.13.0、npm。运行时还需要 PATH 中可用且已配置的 Codex CLI。
 以下脚本适用于 Bash 环境（Linux/macOS），可从任意工作目录调用。
 
 ```bash
@@ -615,7 +615,7 @@ full 有 4 工具 × 6 nb = 24 次工具进程，合计 84 个用例执行；smo
 - 专用 CTest 和原有 FP32 n=32 回归通过。`tests/reference.hpp` 从原正确性测试原样提取高精度参考与残差函数，由两个测试入口共享；未修改数值阈值。
 - 单次真实演练累计报告约 73 万输入/输出 token（包含缓存输入和 agent 内部多次交互），因此新任务默认 token 软预算设为 100 万；旧任务已冻结预算不变。
 
-强制 kill -9 或系统异常退出不等同于正常 stop。若存在遗留模型/构建进程，应先清理并确认工作区稳定再 resume；第一版没有系统级进程监督器或跨机器调度。
+强制 kill -9 或系统异常退出不等同于正常 stop。`resume` 会先核对并清理当前版本登记的遗留 agent、构建和测试进程组，再核对阶段产物；所有权不明确时阻塞，不接管。旧版本没有登记的遗留进程仍需人工确认。后台 worker 意外退出后需执行 resume；目前不提供跨机器调度或系统启动时自动拉起。
 
 ### Kernel 研究调度与阅读入口
 
@@ -635,6 +635,9 @@ planner 的任务分为：
 sihq kernel diagnose <id> codegen 20,21 --sizes 128 --repeats 1
 sihq kernel diagnose <id> kernels 21 --sizes 32,128,1024 --repeats 3
 sihq kernel diagnose <id> paired 20,21 --sizes 128,512 --repeats 3
+# direct-trsm：已有空闲任务先升级冻结测试（备份、审计，不改变输入或容差）
+sihq kernel enable-numerical-diagnostics <id>
+sihq kernel diagnose <id> numerical 50 --sizes 512,1024 --rhs 2048,4096 --repeats 3
 ```
 
 逐 kernel 使用 NCU kernel replay、base 时钟、cache-control all，profile-from-start off，只采集专用入口的一次调用；它与整体 range 测量的缓存/replay 条件不同，不能拿各 kernel 耗时直接替代整体性能结论。当前报告给出真实 kernel 名称与几何，不猜测每个 cuBLAS 内核对应的数学阶段。代码体积采用 SASS 指令地址范围（包含 padding），不是独立 ELF section 大小。
@@ -645,7 +648,7 @@ sihq kernel diagnose <id> paired 20,21 --sizes 128,512 --repeats 3
 
 `references` 仅允许配置知识库根目录内的真实文件与 SHA-256；候选、基线等本地分析使用 `localEvidence`、`hypothesis` 或 `changes`。引用/计划校验错误会带具体反馈请求结构修正，仍受阶段修正预算约束。
 
-连接中断（包括 TLS EOF、stream disconnected）使用原 thread 与落盘现场重试，不额外消耗语义修正次数，但计入实际调用数和运行时间。默认故障窗口 600 秒、最长退避 60 秒，含随机抖动；`state.networkRetry` 可配置 `windowSeconds`、`maxDelaySeconds`。持续失败进入 blocked；`resume` 开启新的故障窗口。等待期间 pause/stop/时间到期均可生效。只读阶段在失败时也检查源码未变；开发阶段重试明确提示先核对部分修改。收尾总结亦支持有限故障窗口重试，保持原停止原因。
+连接中断（包括 TLS EOF、stream disconnected）使用原 thread 与落盘现场重试，不额外消耗语义修正次数，但计入实际调用数和运行时间。默认故障窗口 600 秒、最长退避 60 秒，含随机抖动；空闲时可用 `sihq kernel recovery-policy <id> --window-seconds 600 --max-delay-seconds 60` 配置。持续失败进入 blocked；`resume` 开启新的故障窗口。等待期间 pause/stop/时间到期均可生效。只读阶段在失败时也检查源码未变；开发阶段重试明确提示先核对部分修改。收尾总结亦支持有限故障窗口重试，保持原停止原因。
 
 
 ### 算法探索与平台调优
@@ -685,3 +688,43 @@ sihq kernel resume <id>
 
 `npm run format` 统一源码和测试格式，`npm run format:check` 检查格式。
 运行 `npm run check` 和 `npm test` 验证类型及行为。`tests/refactor.test.mjs` 覆盖清理失败、记录迁移、缓存损坏、命令解析与注入式恢复测试；kernel 原有测试覆盖预算、暂停恢复和算法族验证。
+
+
+## 统一执行、故障恢复与持久化
+
+Node 要求 >=22.13.0。默认通过 `codex app-server` 的 stdio JSON-RPC 接入；已验证 Codex 0.169.x。初始化会检查版本，关键事件会检查结构。CLI 升级超出已测版本时会明确阻塞；验证新版本时可显式使用 `SIHQ_ALLOW_UNTESTED_CODEX=1`，但不能跳过关键事件结构校验。`@openai/codex-sdk` 固定 0.169.0 用于类型兼容。需要旧 exec 通道时显式设置 `SIHQ_CODEX_TRANSPORT=exec`；它缺少 turn 状态查询能力，恢复保障较弱，不会自动降级到该通道。
+
+普通任务、聊天、workflow、kernel 阶段与 planner 收尾共用执行器：
+
+- `willRetry=true` 表示 Codex 正在内部恢复，控制器不会另起调用。最终依据 turn 的终态，而不是 error 文本或事件名判断成功。
+- 终止的暂时性故障采用指数退避与随机抖动；有结构化 Retry-After 时使用该等待时间。恢复截止时间会取消仍在运行的重试，不只限制退避次数。
+- 认证、请求配置、协议不兼容和现场完整性错误阻塞；模型输出校验错误使用独立的有限纠错；数值失败仍走实验决策。
+- 恢复先检查旧进程、turn 历史与源码指纹。已完成但未登记的结果补登记；部分修改保留并提示 agent 核对。请求可能已提交却无法确认结果时，不盲目重复提交。
+- 同一逻辑操作有稳定 ID，失败重试不会改成新的开发需求。显式的新需求/修复仍使用新的操作 ID。
+- agent 和测试命令使用登记的独立进程组。取消先通知 agent，再终止进程组并确认退出；超出宽限才发送 SIGKILL。进程记录包括启动标识、boot ID 和所有权 token。
+- GPU 被另一项 sihq 验证占用时等待资源，可被 stop/预算到期取消，不把竞争资源记成算法失败。
+
+每个 run/chat/workflow/kernel 记录目录增加 `runtime.sqlite`。SQLite 中的阶段状态、操作结果和执行事件是恢复依据，原 `run.json`、`workflow.json`、`chat.json`、`state.json` 继续作为可读导出。**修改这些导出 JSON 不会改变已迁移任务的执行状态。** 旧记录首次保存时才迁移，原 JSON 保存在 `legacy-records/`，源码、日志和历史实验不搬迁。文件产物先写入并校验，阶段提交同时保存关联操作记录；崩溃留下的结果可从数据库恢复导出。
+
+运行锁使用事务化所有权记录，兼容读取旧 PID 锁；新锁区分进程启动时间，释放时检查 token。`kernel status` 增加 `execution`、结构化 `failure`、资源等待 `activity` 和 `recoveryRequired`；`*.wire.jsonl` 保留 Codex 原始协议事件。
+
+| 环境变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `SIHQ_RECOVERY_WINDOW_MS` | 600000 | 一次连续故障的恢复窗口，0 表示不自动重试 |
+| `SIHQ_MAX_RETRY_DELAY_MS` | 60000 | 指数退避的最大等待；服务端 Retry-After 仍受总恢复窗口约束 |
+| `SIHQ_IDLE_TIMEOUT_MS` | 600000 | agent 无可观察进展检测；0 关闭。重连通知不刷新进展时间 |
+| `SIHQ_OUTPUT_CORRECTIONS` | 2 | 模型输出校验的纠错次数，与网络恢复分别计数 |
+
+kernel 已保存的 recovery-policy 优先于窗口与退避环境变量。无进展检测依赖 agent 事件；长时间无输出的合法工具调用可适当调高或关闭检测。它与研究预算分开；`--time-only` 仍可只限制总实验时间，网络恢复等待计入运行时间。
+
+stop 与时间到期都会取消当前实验、冻结现场，然后执行独立的 planner 总结。总结也使用共享恢复策略。若 planner 不可用，`summary-pending.json` / `summary-pending.txt` 提供控制器事实记录；这不代表 planner 已总结。之后 resume 只恢复总结，不重新实验。
+
+`tests/recovery.test.mjs` 使用实际子进程注入重连、部分写入、确认丢失、协议损坏、无进展、取消和 worker 崩溃；数据库测试会在事务中 SIGKILL 写进程，验证恢复。原 exec 集成测试显式选择兼容通道，并关闭自动恢复以保持其阶段失败测试语义。
+
+### 直接 TRSM/TRSV 研究
+
+`kernel start` 新增 `--research direct-trsm`，实验项目为 `/root/gpuhpc-workspace/warp-trsm`。
+复用既有五阶段、预算、恢复及归档；`--prepare-only` 可仅冻结任务配置和测试，不启动 Worker。
+默认研究配置仍为 `diagonal-trtri`。详见 [direct-trsm 使用与测试契约](docs/direct-trsm.md)。
+
+数值诊断记录首个失败元素的行列、实际值、参考值、绝对误差、容差、lda/ldb/ldx 和 CUDA 状态。诊断用例通过不等于完整验收通过。direct-trsm 测试在默认 stream 的 D2D 输入复制后显式等待完成，再启动 non-blocking 求解 stream，防止输入未就绪导致偶发数值错误；同步不在性能计时区间内。冻结测试升级保留旧版本和哈希审计，旧归档结论不被覆盖，新的验证使用新的测试指纹。

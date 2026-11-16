@@ -1,3 +1,4 @@
+import { researchConfig, type ResearchConfig } from './research-config.js';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { command } from './process.js';
@@ -8,11 +9,12 @@ async function compileFrozen(
   log: string,
   signal: AbortSignal,
   onBuild: () => void = () => {},
+  research: ResearchConfig = researchConfig(),
 ): Promise<string> {
   const build = join(dest, 'build');
   // A fixed build recipe, outside the candidate, prevents changed CMake/test code from bypassing checks.
   const quote = (v: string) => '"' + v.replaceAll('\\', '/').replaceAll('"', '\\"') + '"';
-  const initializerSource = ['benchmark_input.cu', 'correctness_input.cu']
+  const initializerSource = research.initializerFiles
     .map((name) => join(trusted, 'tests', name))
     .filter((path) => existsSync(path))
     .map((path) => ' ' + quote(path))
@@ -22,15 +24,16 @@ async function compileFrozen(
     `cmake_minimum_required(VERSION 3.22)
 project(kernel_check LANGUAGES CXX CUDA)
 find_package(CUDAToolkit REQUIRED)
-find_package(Boost REQUIRED)
-add_library(candidate STATIC ${quote(join(source, 'src/trtri.cu'))})
+${research.boost ? 'find_package(Boost REQUIRED)' : ''}
+add_library(candidate STATIC ${quote(join(source, research.sourceFile))})
 target_include_directories(candidate PRIVATE ${quote(join(source, 'include'))})
 target_link_libraries(candidate PUBLIC CUDA::cudart CUDA::cublas)
 target_compile_features(candidate PRIVATE cuda_std_17)
-add_executable(diagonal ${quote(join(trusted, 'tests/diagonal_workflow.cpp'))}${initializerSource})
+add_executable(diagonal ${quote(join(trusted, 'tests', research.testFile))}${initializerSource})
 target_include_directories(diagonal PRIVATE ${quote(join(trusted, 'include'))} ${quote(join(trusted, 'tests'))} \${Boost_INCLUDE_DIRS})
 target_compile_features(diagonal PRIVATE cxx_std_17 cuda_std_17)
 target_link_libraries(diagonal PRIVATE candidate)
+set_target_properties(diagonal PROPERTIES BUILD_RPATH "\${CUDAToolkit_LIBRARY_DIR}")
 `,
   );
   await command(
@@ -77,10 +80,12 @@ export async function buildFrozen(
   log: string,
   signal: AbortSignal,
   onBuild: () => void = () => {},
+  research: ResearchConfig = researchConfig(),
 ): Promise<string> {
   signal.throwIfAborted();
   mkdirSync(dest, { recursive: true });
   const inputs = {
+    research,
     source: manifest(source),
     trusted: treeManifest(trusted),
     toolchain: toolchain(),
@@ -114,7 +119,15 @@ export async function buildFrozen(
   rmSync(cache, { recursive: true, force: true });
   mkdirSync(cache, { recursive: true });
   copySource(source, join(cache, 'source'));
-  const built = await compileFrozen(join(cache, 'source'), trusted, cache, log, signal, onBuild);
+  const built = await compileFrozen(
+    join(cache, 'source'),
+    trusted,
+    cache,
+    log,
+    signal,
+    onBuild,
+    research,
+  );
   if (
     JSON.stringify(manifest(source)) !== JSON.stringify(inputs.source) ||
     JSON.stringify(treeManifest(trusted)) !== JSON.stringify(inputs.trusted)

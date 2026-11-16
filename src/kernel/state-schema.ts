@@ -1,3 +1,4 @@
+import { researchFor } from './research-config.js';
 import { z } from 'zod';
 import { rolesConfigSchema } from '../config/roles.js';
 import { budgetSchema } from './budget-schema.js';
@@ -100,5 +101,7 @@ export function parseKernelState(value: unknown): State {
   const record = z.record(z.string(), z.unknown()).parse(value);
   const version = record.schemaVersion ?? 0;
   if (version !== 0 && version !== 1) throw new Error(`不支持的 kernel 状态版本：${version}`);
-  return stateSchema.parse({ ...record, schemaVersion: 1 });
+  const state = stateSchema.parse({ ...record, schemaVersion: 1 });
+  researchFor(state as State);
+  return state;
 }

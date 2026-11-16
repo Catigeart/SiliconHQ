@@ -8,6 +8,7 @@ import type { RoleResult } from '../roles/types.js';
 import { atomicJson } from '../storage/files.js';
 import { RunStore, type Run } from '../storage/runs.js';
 import { prepareRoleContext, readRoleContext } from './prepare.js';
+import { captureWorkspace } from '../workspace/git.js';
 
 export type TaskObserver = {
   log(message: string): void;
@@ -46,7 +47,7 @@ export async function executeTask(
     const role = run.role ? getRoleDefinition(run.role, run.purpose) : undefined;
     const context = prepareRoleContext(store, run, prompt);
     let answer = '';
-    await runCodex(role ? role.buildPrompt(context) : prompt, signal, {
+    answer = await runCodex(role ? role.buildPrompt(context) : prompt, signal, {
       cwd: run.cwd,
       threadId: run.threadId,
       model: run.model,
@@ -56,6 +57,22 @@ export async function executeTask(
       approvalPolicy: role ? 'never' : undefined,
       outputSchema: role?.outputSchema,
       displayMessages: role?.displayMessages,
+      execution: {
+        directory: store.directory(run.id),
+        id: executionId,
+        capture: () => captureWorkspace(run.cwd),
+      },
+      validateOutput: role
+        ? (answer) => {
+            role.parseResult(answer, context);
+          }
+        : undefined,
+      onExecutionEvent: (type, data) => {
+        store.append(run.id, { type, data });
+        if (type === 'execution.retry' || type === 'provider.reconnecting')
+          log(`[恢复] ${JSON.stringify(data)}`);
+      },
+      onRawEvent: (event) => store.append(run.id, { type: 'provider.raw', event }),
       renderEvent: observer?.renderEvent,
       onEvent(event) {
         store.append(run.id, event);

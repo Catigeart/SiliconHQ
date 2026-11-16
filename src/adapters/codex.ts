@@ -3,9 +3,17 @@ import type {
   ModelReasoningEffort,
   SandboxMode,
   ThreadEvent,
-  ThreadOptions,
 } from '@openai/codex-sdk';
-import { speedConfig, type Speed } from '../config/speed.js';
+import { randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
+import { type Speed } from '../config/speed.js';
+import { dataDirectory } from '../storage/files.js';
+import { executionScope } from '../runtime/context.js';
+import { executeOperation, type ExecutionOptions } from '../runtime/executor.js';
+import { classify, ExecutionError, fault, outputError } from '../runtime/faults.js';
+import { Journal } from '../runtime/journal.js';
+import { appServerTurn } from './app-server.js';
+import { execTurn } from './exec-transport.js';
 
 // 进度写入 stderr，Agent 的回答写入 stdout，方便重定向结果。
 export function showEvent(event: ThreadEvent, displayMessages = true): void {
@@ -50,48 +58,119 @@ export async function consumeEvents(
   let completed = false;
   for await (const event of events) {
     onEvent?.(event);
-    if (event.type === 'turn.failed') throw new Error(event.error.message);
-    if (event.type === 'error') throw new Error(event.message);
+    if (event.type === 'turn.failed') throw new ExecutionError(classify(event.error));
+    if (event.type === 'error') {
+      // exec drops willRetry. Only a narrow, version-tested reconnect notice is
+      // nonterminal; unknown errors still fail closed.
+      if (/^Reconnecting\.\.\. \d+\/\d+(?:\s*\(|$)/.test(event.message)) continue;
+      throw new ExecutionError(classify(event));
+    }
     if (renderEvent) renderEvent(event);
     else showEvent(event, displayMessages);
     if (event.type === 'turn.completed') completed = true;
   }
-  if (!completed) throw new Error('Codex 事件流提前结束，任务未确认完成。');
+  if (!completed)
+    throw fault('transport', 'STREAM_EOF', 'Codex 事件流提前结束，任务未确认完成。', 'reconcile');
 }
 
+export type CodexOptions = {
+  speed?: Speed;
+  cwd: string;
+  threadId?: string;
+  model?: string;
+  reasoningEffort?: ModelReasoningEffort;
+  sandboxMode?: SandboxMode;
+  approvalPolicy?: ApprovalMode;
+  outputSchema?: unknown;
+  displayMessages?: boolean;
+  renderEvent?: (event: ThreadEvent) => void;
+  onEvent?: (event: ThreadEvent) => void;
+  onRawEvent?: (event: unknown) => void;
+  onExecutionEvent?: (type: string, data: unknown) => void;
+  validateOutput?: (answer: string) => void;
+  execution?: { directory: string; id: string; capture?: () => unknown };
+  codexPath?: string;
+  transport?: 'app-server' | 'exec';
+  startupTimeoutMs?: number;
+  recoveryPolicy?: ExecutionOptions<string>['policy'];
+};
 export async function runCodex(
   prompt: string,
   signal: AbortSignal,
-  options: {
-    speed?: Speed;
-    cwd: string;
-    threadId?: string;
-    model?: string;
-    reasoningEffort?: ModelReasoningEffort;
-    sandboxMode?: SandboxMode;
-    approvalPolicy?: ApprovalMode;
-    outputSchema?: unknown;
-    displayMessages?: boolean;
-    renderEvent?: (event: ThreadEvent) => void;
-    onEvent?: (event: ThreadEvent) => void;
-  },
-): Promise<void> {
-  const { Codex } = await import('@openai/codex-sdk');
-  const codex = new Codex({ codexPathOverride: 'codex', config: speedConfig(options.speed) });
-  const settings: ThreadOptions = {
-    workingDirectory: options.cwd,
-    skipGitRepoCheck: true,
-    model: options.model,
-    modelReasoningEffort: options.reasoningEffort,
-    sandboxMode: options.sandboxMode,
-    approvalPolicy: options.approvalPolicy,
+  options: CodexOptions,
+): Promise<string> {
+  const invoke = async (activeSignal: AbortSignal) => {
+    const scope = executionScope.getStore();
+    let answer = '';
+    const emit = (event: ThreadEvent) => {
+      if (event.type === 'thread.started') scope?.provider({ threadId: event.thread_id });
+      if (event.type === 'item.completed' && event.item.type === 'agent_message')
+        answer = event.item.text;
+      if (event.type === 'turn.completed' && transport === 'exec')
+        scope?.provider({
+          terminal: { transport: 'exec', status: 'completed', answer, usage: event.usage },
+        });
+      if (event.type !== 'error') scope?.progress();
+      options.onEvent?.(event); // persistence callbacks are part of the execution contract
+      try {
+        if (options.renderEvent) options.renderEvent(event);
+        else showEvent(event, options.displayMessages);
+      } catch {
+        /* A terminal renderer must not restart a successful mutation. */
+      }
+    };
+    const recovery = scope?.recovery
+      ? `\n上次调用可能已产生修改。先检查当前工作区、已有产物与会话记录，只完成剩余工作，不重复应用已有修改。调用前现场：${JSON.stringify(scope.operation.before)}；上次现场：${JSON.stringify(scope.operation.after)}。`
+      : '';
+    const feedback = scope?.feedback
+      ? `\n上次输出未通过校验，请仅修正报告并输出完整结果：${scope.feedback}`
+      : '';
+    const transport = options.transport ?? process.env.SIHQ_CODEX_TRANSPORT ?? 'app-server';
+    if (!['app-server', 'exec'].includes(transport))
+      throw fault('configuration', 'TRANSPORT', '未知 Codex transport：' + transport);
+    await (transport === 'exec' ? execTurn : appServerTurn)(
+      prompt + recovery + feedback,
+      activeSignal,
+      options,
+      emit,
+    );
+    if (!answer.trim())
+      throw fault('output', 'EMPTY_OUTPUT', 'Codex 调用结束但没有有效回答', 'correct');
+    try {
+      options.validateOutput?.(answer);
+    } catch (error) {
+      throw outputError(error);
+    }
+    return answer;
   };
-  const thread = options.threadId
-    ? codex.resumeThread(options.threadId, settings)
-    : codex.startThread(settings);
-  const { events } = await thread.runStreamed(prompt, {
+  if (executionScope.getStore()) return invoke(signal);
+  const directory = options.execution?.directory ?? dataDirectory('operations', randomUUID());
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return executeOperation({
+    journal: new Journal(directory),
+    id: options.execution?.id ?? randomUUID(),
+    identity: {
+      prompt,
+      cwd: options.cwd,
+      model: options.model,
+      effort: options.reasoningEffort,
+      speed: options.speed,
+      schema: options.outputSchema,
+      sandbox: options.sandboxMode,
+    },
     signal,
-    outputSchema: options.outputSchema,
+    invoke,
+    capture: options.execution?.capture,
+    readOnly: options.sandboxMode === 'read-only',
+    policy: options.recoveryPolicy,
+    validate: (value) => {
+      if (typeof value !== 'string')
+        throw fault('integrity', 'RESULT_CORRUPT', '持久化回答格式损坏');
+      options.validateOutput?.(value);
+      return value;
+    },
+    onEvent:
+      options.onExecutionEvent ??
+      ((type, data) => console.error(`[${type}] ${JSON.stringify(data)}`)),
   });
-  await consumeEvents(events, options.onEvent, options.displayMessages, options.renderEvent);
 }

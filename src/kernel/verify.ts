@@ -1,10 +1,21 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { numericalFailures } from './numerical.js';
+import {
+  researchFor,
+  isDirect,
+  solveCheckMarkers,
+  solveCompatibilityMarkers,
+  solveSampling,
+  solveNcuArguments,
+  assertMarkers,
+} from './research-config.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { lockWorkspace } from '../storage/workspace-lock.js';
+import { acquireGpu } from './resources.js';
 import { buildFrozen, digest } from './build.js';
 import { environmentIdentity, evidenceKey, loadEvidence, saveEvidence } from './evidence-cache.js';
 import { ncuArguments, ncuExecutable, ncuSamples, sampling } from './performance.js';
 import { command } from './process.js';
+import { fault } from '../runtime/faults.js';
 import { atomic, manifest, readJson, treeManifest, type State } from './store.js';
 
 export type Evidence = {
@@ -15,8 +26,11 @@ export type Evidence = {
   sizes: number[];
   profile: string;
   performance: {
-    nb: number;
-    blocks: number;
+    nb?: number;
+    blocks?: number;
+    n?: number;
+    nrhs?: number;
+    backend?: string;
     uplo: number;
     diag: number;
     samples: number[];
@@ -25,9 +39,11 @@ export type Evidence = {
     clockControl?: string;
     iterations?: number;
   }[];
+  libraryPerformance?: Evidence['performance'];
   log: string;
   compatibility?: { reused: boolean; path: string; reason: string };
   correctnessLogs?: string[];
+  numericalFailures?: ReturnType<typeof numericalFailures>;
   error?: string;
   targetRuntimeVerified: false;
 };
@@ -41,6 +57,8 @@ export async function verify(
 ): Promise<Evidence> {
   mkdirSync(dest, { recursive: true });
   const log = join(dest, 'commands.log');
+  const research = researchFor(s),
+    direct = isDirect(s);
   const evidence: Evidence = {
     passed: false,
     source: manifest(source),
@@ -54,16 +72,24 @@ export async function verify(
   // Serialize this controller's GPU tests across campaigns, without suspending unrelated processes.
   const gpuLockDir = join(root, '..', 'gpu-lock');
   mkdirSync(gpuLockDir, { recursive: true });
-  const unlock = lockWorkspace(gpuLockDir);
+  const unlock = await acquireGpu(s, root, signal);
   let phase = 'configure';
   try {
     const trusted = join(root, 'trusted');
     const trustedHash = readJson(join(root, 'trusted-manifest.json'));
     if (JSON.stringify(treeManifest(trusted)) !== JSON.stringify(trustedHash))
       throw new Error('固定测试源码被修改');
-    const executable = await buildFrozen(source, trusted, dest, log, signal, () => {
-      phase = 'build';
-    });
+    const executable = await buildFrozen(
+      source,
+      trusted,
+      dest,
+      log,
+      signal,
+      () => {
+        phase = 'build';
+      },
+      research,
+    );
     const binaryHash = digest(readFileSync(executable));
     evidence.architectures = [80, 90, 120];
     phase = 'test';
@@ -71,6 +97,10 @@ export async function verify(
     phase = 'environment';
     const key = evidenceKey({
       kind: 'correctness-v2',
+      researchImplementation: digest(
+        readFileSync(new URL('./research-config.js', import.meta.url)),
+      ),
+      research,
       source: evidence.source,
       trustedHash,
       binary: binaryHash,
@@ -95,6 +125,10 @@ export async function verify(
         writeFileSync(file, '');
         evidence.correctnessLogs.push(file);
         await command([executable, split ? 'core' : 'check', String(nb)], dest, file, signal);
+        if (direct) {
+          assertMarkers(readFileSync(file, 'utf8'), solveCheckMarkers(nb), ['CHECK,']);
+          continue;
+        }
         const rows = readFileSync(file, 'utf8')
           .split('\n')
           .filter((row) => row.startsWith('CHECK,'));
@@ -119,6 +153,12 @@ export async function verify(
         const file = join(dest, 'compat-32.log');
         writeFileSync(file, '');
         await command([executable, 'compat', '32'], dest, file, signal);
+        if (direct)
+          assertMarkers(readFileSync(file, 'utf8'), solveCompatibilityMarkers(), [
+            'COMPAT,',
+            'TAIL,',
+            'ALPHA,',
+          ]);
         const rows = readFileSync(file, 'utf8')
           .split('\n')
           .filter((row) => row.startsWith('CHECK,'));
@@ -127,12 +167,14 @@ export async function verify(
           'CHECK,32,1,13,1,0,2,PASS',
           'CHECK,32,1,13,1,1,2,PASS',
         ];
-        if (JSON.stringify([...rows].sort()) !== JSON.stringify(expected.sort()))
+        if (!direct && JSON.stringify([...rows].sort()) !== JSON.stringify(expected.sort()))
           throw new Error('兼容集结果不完整');
         evidence.compatibility = {
           reused: false,
           path: file,
-          reason: '首次执行或源码变化，保守重跑三项兼容检查',
+          reason: direct
+            ? 'side/uplo/trans/diag、alpha 与非整tile固定兼容集'
+            : '首次执行或源码变化，保守重跑三项兼容检查',
         };
       }
       if (
@@ -165,7 +207,52 @@ export async function verify(
         ],
       );
     }
-    if (
+    if (performance && direct) {
+      phase = 'profiling';
+      const ncu = ncuExecutable();
+      for (const n of s.sizes)
+        for (const nrhs of research.rhs)
+          for (const library of source === join(root, 'baseline') ? [false, true] : [false]) {
+            const policy = solveSampling(n, nrhs);
+            const file = join(dest, `bench-${n}-${nrhs}${library ? '-cublas' : ''}.log`),
+              report = join(dest, `ncu-${n}-${nrhs}${library ? '-cublas' : ''}.csv`);
+            writeFileSync(file, '');
+            writeFileSync(report, '');
+            await command(
+              [ncu, ...solveNcuArguments(executable, n, nrhs, report, library)],
+              dest,
+              file,
+              signal,
+            );
+            const output = readFileSync(file, 'utf8');
+            if (/==ERROR==|==WARNING==/.test(output)) throw new Error(output.slice(-2000));
+            assertMarkers(
+              output,
+              Array.from(
+                { length: policy.groups },
+                (_, i) => `PROFILE,${n},${nrhs},${i},${policy.iterations}`,
+              ),
+              ['PROFILE,'],
+            );
+            const samples = ncuSamples(
+              readFileSync(report, 'utf8'),
+              policy.groups,
+              policy.iterations,
+            );
+            (library ? (evidence.libraryPerformance ??= []) : evidence.performance).push({
+              n,
+              nrhs,
+              backend: library ? 'cublas-reference' : 'candidate-direct',
+              uplo: 0,
+              diag: 0,
+              samples,
+              medianUs: [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)]!,
+              timingMethod: 'ncu-range-gpu-duration',
+              clockControl: 'base',
+              iterations: policy.iterations,
+            });
+          }
+    } else if (
       performance &&
       (s.performancePolicy === 'ncu-base-v1' || s.performancePolicy === 'ncu-base-pitched-v2')
     ) {
@@ -245,6 +332,18 @@ export async function verify(
     evidence.passed = true;
   } catch (error) {
     evidence.error = String(error);
+    if (direct) {
+      try {
+        evidence.numericalFailures = [
+          ...(evidence.correctnessLogs ?? []),
+          join(dest, 'compat-32.log'),
+        ]
+          .filter(existsSync)
+          .flatMap((file) => numericalFailures(readFileSync(file, 'utf8')));
+      } catch (parseError) {
+        evidence.error += '；数值诊断记录无效：' + String(parseError);
+      }
+    }
     if (signal.aborted) throw error;
     if (
       phase === 'configure' ||
@@ -254,7 +353,10 @@ export async function verify(
         String(error),
       )
     )
-      throw new Error('验证环境受阻：' + String(error));
+      throw fault('environment', 'VERIFIER_UNAVAILABLE', '验证环境受阻：' + String(error), 'stop', {
+        phase,
+        log,
+      });
   } finally {
     atomic(join(dest, 'evidence.json'), evidence);
     unlock();

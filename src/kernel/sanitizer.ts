@@ -1,7 +1,8 @@
+import { researchFor, isDirect, solveSanitizerMarkers } from './research-config.js';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
-import { lockWorkspace } from '../storage/workspace-lock.js';
+import { acquireGpu } from './resources.js';
 import { buildFrozen } from './build.js';
 import { command } from './process.js';
 import { atomic, manifest, readJson, treeManifest, type State } from './store.js';
@@ -20,7 +21,8 @@ export type SanitizerEvidence = {
   error?: string;
   cases: {
     tool: SanitizerTool;
-    nb: number;
+    nb?: number;
+    n?: number;
     status: 'passed' | 'failed' | 'blocked';
     log: string;
     reused: boolean;
@@ -46,6 +48,7 @@ export function classifySanitizer(
   tool: SanitizerTool,
   nb: number,
   commandFailed = false,
+  markers: string[] = sanitizerMarkers(nb),
 ): 'passed' | 'failed' | 'blocked' {
   // Environment failures take precedence over a misleading "0 errors" summary.
   if (
@@ -66,8 +69,7 @@ export function classifySanitizer(
       ? /RACECHECK SUMMARY: 0 hazards displayed \(0 errors, 0 warnings\)/.test(log)
       : /ERROR SUMMARY: 0 errors/.test(log);
   const rows = log.split(/\r?\n/).filter((line) => line.startsWith('SANITIZE,'));
-  if (commandFailed || !clean || JSON.stringify(rows) !== JSON.stringify(sanitizerMarkers(nb)))
-    return 'blocked';
+  if (commandFailed || !clean || JSON.stringify(rows) !== JSON.stringify(markers)) return 'blocked';
   return 'passed';
 }
 function hash(value: string | Buffer) {
@@ -109,7 +111,7 @@ export async function sanitize(
     trustedHash = readJson(join(root, 'trusted-manifest.json'));
   const gpuLock = join(root, '..', 'gpu-lock');
   mkdirSync(gpuLock, { recursive: true });
-  const unlock = lockWorkspace(gpuLock);
+  const unlock = await acquireGpu(s, root, signal);
   try {
     if (!same(treeManifest(trusted), trustedHash)) throw new Error('固定测试源码被修改');
     const tool = executable(),
@@ -124,10 +126,22 @@ export async function sanitize(
       environment,
       signal,
     );
-    const binary = await buildFrozen(source, trusted, dest, join(dest, 'build.log'), signal);
+    const binary = await buildFrozen(
+      source,
+      trusted,
+      dest,
+      join(dest, 'build.log'),
+      signal,
+      undefined,
+      researchFor(s),
+    );
     const binaryHash = hash(readFileSync(binary));
     result.key = hash(
       JSON.stringify({
+        research: researchFor(s),
+        researchImplementation: hash(
+          readFileSync(new URL('./research-config.js', import.meta.url)),
+        ),
         source: result.source,
         trustedHash,
         binaryHash,
@@ -166,11 +180,17 @@ export async function sanitize(
           old?.status === 'passed' &&
           existsSync(old.log) &&
           hash(readFileSync(old.log)) === old.logHash &&
-          classifySanitizer(readFileSync(old.log, 'utf8'), toolName, nb) === 'passed'
+          classifySanitizer(
+            readFileSync(old.log, 'utf8'),
+            toolName,
+            nb,
+            false,
+            isDirect(s) ? solveSanitizerMarkers(nb) : sanitizerMarkers(nb),
+          ) === 'passed'
         ) {
           result.cases.push({
             tool: toolName,
-            nb,
+            ...(isDirect(s) ? { n: nb } : { nb }),
             status: 'passed',
             log: old.log,
             reused: true,
@@ -195,11 +215,17 @@ export async function sanitize(
           failure = error;
         }
         const output = readFileSync(log, 'utf8'),
-          status = classifySanitizer(output, toolName, nb, Boolean(failure));
+          status = classifySanitizer(
+            output,
+            toolName,
+            nb,
+            Boolean(failure),
+            isDirect(s) ? solveSanitizerMarkers(nb) : sanitizerMarkers(nb),
+          );
         integrity();
         const record = {
           tool: toolName,
-          nb,
+          ...(isDirect(s) ? { n: nb } : { nb }),
           status,
           log,
           reused: false,
@@ -209,7 +235,7 @@ export async function sanitize(
         if (status === 'passed') atomic(cacheFile, { ...record, logHash: hash(output) });
         else {
           result.status = status;
-          result.error = `${toolName} nb=${nb} ${status}；日志 ${log}${failure ? '；' + String(failure) : ''}`;
+          result.error = `${toolName} ${isDirect(s) ? 'n' : 'nb'}=${nb} ${status}；日志 ${log}${failure ? '；' + String(failure) : ''}`;
           return result;
         }
         atomic(file, result);

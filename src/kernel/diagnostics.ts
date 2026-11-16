@@ -1,14 +1,21 @@
+import { numericalFailures, numericalMarker } from './numerical.js';
+import { researchFor, isDirect, solveSampling, solveNcuArguments } from './research-config.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { lockWorkspace } from '../storage/workspace-lock.js';
+import { acquireGpu } from './resources.js';
 import { diagnosticSchema } from './agent.js';
 import { buildFrozen, digest } from './build.js';
 import { environmentIdentity, evidenceKey, loadEvidence, saveEvidence } from './evidence-cache.js';
 import { csv, ncuArguments, ncuExecutable, ncuSamples, sampling } from './performance.js';
 import { command } from './process.js';
-import { atomic, manifest, type State } from './store.js';
+import { atomic, manifest, readJson, treeManifest, type State } from './store.js';
 export const capabilities = {
+  numerical: {
+    tool: 'frozen numerical verifier',
+    evidence:
+      'direct-trsm only; selected n/RHS main cases, first failing element, values, tolerance, pitches and CUDA statuses; diagnostic evidence is not full validation',
+  },
   codegen: { tool: 'cuobjdump', evidence: 'PTX, SASS, resource usage; static evidence only' },
   kernels: {
     tool: 'ncu',
@@ -20,6 +27,13 @@ export const capabilities = {
     evidence: 'alternating archived binaries; unchanged fixed range sampling',
   },
 };
+export function diagnosticCapabilities(s: State, root: string) {
+  const { numerical, ...others } = capabilities;
+  const file = join(root, 'trusted/tests/solve_workflow.cu');
+  return isDirect(s) && existsSync(file) && readFileSync(file, 'utf8').includes(numericalMarker)
+    ? capabilities
+    : others;
+}
 export function diagnosticSource(root: string, target: string) {
   if (!/^(baseline|[1-9][0-9]*)$/.test(target)) throw new Error('无效诊断对象');
   const path =
@@ -103,11 +117,16 @@ export async function diagnose(
   mkdirSync(dest, { recursive: true });
   const gpu = join(root, '..', 'gpu-lock');
   mkdirSync(gpu, { recursive: true });
-  const unlock = lockWorkspace(gpu);
+  const unlock = await acquireGpu(s, root, signal);
   const report: any = { status: 'running', requests: [], targetRuntimeVerified: false };
   try {
+    const trustedHash = readJson(join(root, 'trusted-manifest.json'));
+    if (JSON.stringify(treeManifest(join(root, 'trusted'))) !== JSON.stringify(trustedHash))
+      throw new Error('固定测试源码被修改');
     report.environment = environmentIdentity();
     for (const [index, request] of requests.entries()) {
+      if (request.kind === 'numerical' && !('numerical' in diagnosticCapabilities(s, root)))
+        throw new Error('本任务未启用数值诊断，请先执行 kernel enable-numerical-diagnostics');
       const result: any = { ...request, results: [] };
       report.requests.push(result);
       const artifacts = [];
@@ -121,6 +140,8 @@ export async function diagnose(
           dir,
           join(dir, 'build.log'),
           signal,
+          undefined,
+          researchFor(s),
         );
         artifacts.push({
           target,
@@ -134,7 +155,11 @@ export async function diagnose(
       writeFileSync(toolVersion, '');
       await command(
         [
-          request.kind === 'codegen' ? '/usr/local/cuda/bin/cuobjdump' : ncuExecutable(),
+          request.kind === 'numerical'
+            ? '/usr/local/cuda/bin/nvcc'
+            : request.kind === 'codegen'
+              ? '/usr/local/cuda/bin/cuobjdump'
+              : ncuExecutable(),
           '--version',
         ],
         dest,
@@ -142,6 +167,8 @@ export async function diagnose(
         signal,
       );
       const cacheKey = evidenceKey({
+        research: researchFor(s),
+        rhs: request.rhs,
         kind: request.kind,
         sizes: request.sizes,
         repeats: request.repeats,
@@ -162,7 +189,59 @@ export async function diagnose(
       }
       if (request.kind === 'paired' && artifacts.length !== 2)
         throw new Error('paired 需要恰好两个目标');
-      if (request.kind === 'codegen')
+      if (request.kind === 'numerical') {
+        for (const n of request.sizes)
+          for (const nrhs of request.rhs ?? [1, 32, 4096])
+            for (let repeat = 0; repeat < request.repeats; repeat++)
+              for (const artifact of artifacts) {
+                const log = join(artifact.dir, `numerical-${n}-${nrhs}-${repeat}.log`);
+                writeFileSync(log, '');
+                let failure: unknown;
+                try {
+                  await command(
+                    [artifact.binary, 'numerical', String(n), String(nrhs)],
+                    artifact.dir,
+                    log,
+                    signal,
+                  );
+                } catch (error) {
+                  if (signal.aborted) throw error;
+                  failure = error;
+                }
+                const output = readFileSync(log, 'utf8'),
+                  failures = numericalFailures(output);
+                const markers = output
+                  .split(/\r?\n/)
+                  .filter((l) => l.startsWith('NUMERICAL_PASS,'));
+                if (failures.length) {
+                  if (
+                    !failure ||
+                    failures.length !== 1 ||
+                    markers.length ||
+                    failures[0]!.n !== n ||
+                    failures[0]!.nrhs !== nrhs
+                  )
+                    throw new Error('数值失败证据与执行状态/用例不一致：' + log);
+                } else if (
+                  failure ||
+                  markers.length !== 1 ||
+                  markers[0] !== `NUMERICAL_PASS,${n},${nrhs}`
+                )
+                  throw new Error('数值诊断未产生完整结果：' + log + '；' + String(failure));
+                result.results.push({
+                  target: artifact.target,
+                  source: artifact.source,
+                  binaryHash: artifact.hash,
+                  n,
+                  nrhs,
+                  repeat,
+                  log,
+                  numericalPassed: !failure,
+                  failures,
+                  testScope: 'selected main cases only; not full acceptance',
+                });
+              }
+      } else if (request.kind === 'codegen')
         for (const artifact of artifacts) {
           const logs: Record<string, string> = {};
           for (const kind of ['resource-usage', 'ptx', 'sass']) {
@@ -187,59 +266,62 @@ export async function diagnose(
         }
       else
         for (const nb of request.sizes)
-          for (let repeat = 0; repeat < request.repeats; repeat++) {
-            // Alternate A/B then B/A to reduce systematic ordering drift.
-            for (const artifact of repeat % 2 ? [...artifacts].reverse() : artifacts) {
-              const prefix = join(artifact.dir, `${nb}-${repeat}`),
-                log = prefix + '.log',
-                csvFile = prefix + '.csv';
-              writeFileSync(log, '');
-              writeFileSync(csvFile, '');
-              const args =
-                request.kind === 'paired'
-                  ? ncuArguments(artifact.binary, nb, csvFile)
-                  : [
-                      '--clock-control',
-                      'base',
-                      '--cache-control',
-                      'all',
-                      '--profile-from-start',
-                      'off',
-                      '--replay-mode',
-                      'kernel',
-                      '--metrics',
-                      'gpu__time_duration.sum',
-                      '--csv',
-                      '--print-units',
-                      'base',
-                      '--log-file',
-                      csvFile,
-                      artifact.binary,
-                      'bench-ncu',
-                      String(nb),
-                      '4',
-                      '1',
-                      '1',
-                    ];
-              await command([ncuExecutable(), ...args], artifact.dir, log, signal);
-              if (/==ERROR==|==WARNING==/.test(readFileSync(log, 'utf8')))
-                throw new Error('NCU 诊断出现警告或错误：' + log);
-              const raw = readFileSync(csvFile, 'utf8');
-              const policy = sampling(nb);
-              result.results.push({
-                target: artifact.target,
-                source: artifact.source,
-                binaryHash: artifact.hash,
-                nb,
-                repeat,
-                log,
-                csv: csvFile,
-                ...(request.kind === 'paired'
-                  ? { samples: ncuSamples(raw, policy.groups, policy.iterations) }
-                  : { kernels: kernelRows(raw) }),
-              });
+          for (const rhs of isDirect(s) ? (request.rhs ?? [1, 32, 4096]) : [4])
+            for (let repeat = 0; repeat < request.repeats; repeat++) {
+              // Alternate A/B then B/A to reduce systematic ordering drift.
+              for (const artifact of repeat % 2 ? [...artifacts].reverse() : artifacts) {
+                const prefix = join(artifact.dir, `${nb}-${rhs}-${repeat}`),
+                  log = prefix + '.log',
+                  csvFile = prefix + '.csv';
+                writeFileSync(log, '');
+                writeFileSync(csvFile, '');
+                const args =
+                  request.kind === 'paired'
+                    ? isDirect(s)
+                      ? solveNcuArguments(artifact.binary, nb, rhs, csvFile)
+                      : ncuArguments(artifact.binary, nb, csvFile)
+                    : [
+                        '--clock-control',
+                        'base',
+                        '--cache-control',
+                        'all',
+                        '--profile-from-start',
+                        'off',
+                        '--replay-mode',
+                        'kernel',
+                        '--metrics',
+                        'gpu__time_duration.sum',
+                        '--csv',
+                        '--print-units',
+                        'base',
+                        '--log-file',
+                        csvFile,
+                        artifact.binary,
+                        'bench-ncu',
+                        String(nb),
+                        String(rhs),
+                        '1',
+                        '1',
+                      ];
+                await command([ncuExecutable(), ...args], artifact.dir, log, signal);
+                if (/==ERROR==|==WARNING==/.test(readFileSync(log, 'utf8')))
+                  throw new Error('NCU 诊断出现警告或错误：' + log);
+                const raw = readFileSync(csvFile, 'utf8');
+                const policy = isDirect(s) ? solveSampling(nb, rhs) : sampling(nb);
+                result.results.push({
+                  target: artifact.target,
+                  source: artifact.source,
+                  binaryHash: artifact.hash,
+                  ...(isDirect(s) ? { n: nb, nrhs: rhs } : { nb }),
+                  repeat,
+                  log,
+                  csv: csvFile,
+                  ...(request.kind === 'paired'
+                    ? { samples: ncuSamples(raw, policy.groups, policy.iterations) }
+                    : { kernels: kernelRows(raw) }),
+                });
+              }
             }
-          }
       for (const a of artifacts)
         if (
           digest(readFileSync(a.binary)) !== a.hash ||
@@ -248,7 +330,7 @@ export async function diagnose(
           throw new Error('诊断期间产物或源码变化');
       if (request.kind !== 'paired') {
         const logs = result.results.flatMap((r: any) =>
-          r.logs ? Object.values(r.logs) : [r.log, r.csv],
+          r.logs ? Object.values(r.logs) : [r.log, r.csv].filter(Boolean),
         );
         saveEvidence(
           root,

@@ -11,6 +11,8 @@ import { PauseRequested, production, same, type Dependencies } from './runtime-t
 import { createKernelRuntime } from './runtime.js';
 import { createStageContext } from './stage-context.js';
 import { executeStage } from './stages/index.js';
+import { classify } from '../runtime/faults.js';
+import { recoverProcesses } from '../runtime/process.js';
 export type { Dependencies } from './runtime-types.js';
 export async function runKernel(
   id: string,
@@ -27,6 +29,7 @@ export async function runKernel(
       throw new Error('任务已结束或预算耗尽，不能自动续跑');
     const runtime = createKernelRuntime(s, store, deps);
     try {
+      await recoverProcesses(store.dir(id));
       runtime.start();
       await driveKernel(runtime);
     } finally {
@@ -119,6 +122,7 @@ async function driveKernel(runtime: ReturnType<typeof createKernelRuntime>) {
     }
   } catch (error) {
     s.error = String(error);
+    s.failure = classify(error);
     if ((runtime.deadline || runtime.requestedStop) && !s.closeout) {
       runtime.endExperiment();
       try {

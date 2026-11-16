@@ -12,6 +12,7 @@ import {
   recordDirectory,
 } from './files.js';
 import { runRecordSchema } from './schemas.js';
+import { Journal } from '../runtime/journal.js';
 
 export type Run = {
   speed?: Speed;
@@ -44,7 +45,7 @@ export class RunStore {
     const dir = this.directory(run.id);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     run.updatedAt = new Date().toISOString();
-    atomicJson(join(dir, 'run.json'), run);
+    new Journal(dir).checkpoint('run.json', run);
   }
   create(prompt: string, cwd: string): Run {
     const run: Run = {
@@ -59,7 +60,9 @@ export class RunStore {
     return run;
   }
   read(id: string): Run {
-    const run = readValidatedJson(join(this.directory(id), 'run.json'), runRecordSchema) as Run;
+    const run = runRecordSchema.parse(
+      new Journal(this.directory(id)).readCheckpoint('run.json'),
+    ) as Run;
     if (run.id !== id || typeof run.cwd !== 'string' || typeof run.prompt !== 'string')
       throw new Error('运行记录损坏');
     return run;

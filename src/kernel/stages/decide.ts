@@ -47,6 +47,8 @@ export async function handleDecide(context: StageContext): Promise<StageResult> 
   const comparison = (final?.performance ?? []).map((item: any) => {
     const base = baseline.performance.find(
       (v) =>
+        v.n === item.n &&
+        v.nrhs === item.nrhs &&
         v.nb === item.nb &&
         v.blocks === item.blocks &&
         v.uplo === item.uplo &&
@@ -54,6 +56,8 @@ export async function handleDecide(context: StageContext): Promise<StageResult> 
     );
     const parent = parentEvidence.performance?.find(
       (v: any) =>
+        v.n === item.n &&
+        v.nrhs === item.nrhs &&
         v.nb === item.nb &&
         v.blocks === item.blocks &&
         v.uplo === item.uplo &&

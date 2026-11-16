@@ -31,8 +31,10 @@ export const evidenceSchema = z
     performance: z.array(
       z
         .object({
-          nb: z.number(),
-          blocks: z.number(),
+          nb: z.number().optional(),
+          n: z.number().optional(),
+          nrhs: z.number().optional(),
+          blocks: z.number().optional(),
           uplo: z.number(),
           diag: z.number(),
           samples: z.array(z.number()),
@@ -41,7 +43,19 @@ export const evidenceSchema = z
           clockControl: z.string().optional(),
           iterations: z.number().optional(),
         })
-        .passthrough(),
+        .passthrough()
+        .refine(
+          (row) =>
+            (row.n !== undefined &&
+              row.nrhs !== undefined &&
+              row.nb === undefined &&
+              row.blocks === undefined) ||
+            (row.nb !== undefined &&
+              row.blocks !== undefined &&
+              row.n === undefined &&
+              row.nrhs === undefined),
+          '性能证据必须明确使用 n/nrhs 或 nb/blocks，不能缺项或混用',
+        ),
     ),
     log: z.string(),
     error: z.string().optional(),

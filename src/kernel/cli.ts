@@ -1,3 +1,5 @@
+import { enableNumericalDiagnostics } from './upgrade-diagnostics.js';
+import { researchConfig, researchIdSchema } from './research-config.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
@@ -19,13 +21,17 @@ import { writeResearchIndex } from './reports.js';
 import { researchModeSchema } from './research.js';
 import { runKernel } from './runner.js';
 import { KernelStore, atomic, copySource, manifest, treeManifest, type State } from './store.js';
+import { ownerAlive } from '../runtime/identity.js';
+import { recoveryPolicy } from '../runtime/policy.js';
 
-const help = `sihq kernel start <project> [--experiments 2] [--seconds 3600] [--calls 16] [--tokens 1000000] [--stage-seconds 600] [--time-only] [--research-mode algorithm-exploration|platform-tuning] [--attempts 2] [--smoke] [--objective "研究目标"] [--foreground] [--fast|--no-fast]
+const help = `sihq kernel start <project> [--research diagonal-trtri|direct-trsm] [--experiments 2] [--seconds 3600] [--calls 16] [--tokens 1000000] [--stage-seconds 600] [--time-only] [--research-mode algorithm-exploration|platform-tuning] [--attempts 2] [--smoke] [--objective "研究目标"] [--foreground|--prepare-only] [--fast|--no-fast]
 sihq kernel status <id> | list | experiments <id> | logs <id> [--follow]
 sihq kernel pause <id> | stop <id> | resume <id> [--foreground]
+sihq kernel enable-numerical-diagnostics <id>
 sihq kernel research-mode <id> <algorithm-exploration|platform-tuning>
+sihq kernel recovery-policy <id> [--window-seconds 600] [--max-delay-seconds 60]
 sihq kernel report <id>
-sihq kernel diagnose <id> <codegen|kernels|paired> <baseline,实验编号> [--sizes 32,128] [--repeats 3]
+sihq kernel diagnose <id> <codegen|kernels|paired|numerical> <baseline,实验编号> [--sizes 32,128] [--rhs 1,32] [--repeats 3]
 sihq kernel steer <id> "下一轮优先 nb=512"
 预算值接受正整数或 unlimited；--time-only 仅保留 --seconds 限制。到期或 stop 取消实验后由 planner 总结，收尾另计时间。`;
 function alive(pid?: number) {
@@ -50,23 +56,24 @@ function launch(s: State, store: KernelStore) {
     `kernel ${s.id}\n后台 PID ${child.pid}\n查看：sihq kernel status ${s.id}\n日志：${join(store.dir(s.id), 'events.jsonl')}`,
   );
 }
-export async function kernelCli(input: string[]): Promise<void> {
+export async function kernelCli(input: string[], store = new KernelStore()): Promise<void> {
   if (!input.length || input[0] === '--help') {
     console.log(help);
     return;
   }
-  const store = new KernelStore();
   const command = input[0];
   if (command === 'start') {
     const parsed = parseSpeedArgs(input.slice(1));
     const args = parsed.args;
     const project = realpathSync(args.shift() ?? '');
     let researchMode = researchModeSchema.parse('algorithm-exploration');
+    let researchId = researchIdSchema.parse('diagonal-trtri');
     const budget: Record<string, number | null> = {};
+    let prepareOnly = false;
     let foreground = false,
       smoke = false,
       timeOnly = false,
-      objective = '持续研究可跨 A100/H800 调参的 FP32 warp-level 对角块求逆方案。';
+      objective = '';
     const names: Record<string, string> = {
       '--experiments': 'experiments',
       '--seconds': 'seconds',
@@ -77,27 +84,25 @@ export async function kernelCli(input: string[]): Promise<void> {
     };
     while (args.length) {
       const key = args.shift()!;
-      if (key === '--research-mode' && args.length)
+      if (key === '--research' && args.length) researchId = researchIdSchema.parse(args.shift());
+      else if (key === '--research-mode' && args.length)
         researchMode = researchModeSchema.parse(args.shift());
       else if (key === '--time-only') timeOnly = true;
       else if (key === '--objective' && args.length) objective = args.shift()!;
       else if (key === '--foreground') foreground = true;
+      else if (key === '--prepare-only') prepareOnly = true;
       else if (key === '--smoke') smoke = true;
       else if (names[key] && args.length) budget[names[key]!] = parseLimit(args.shift()!);
       else throw new Error(help);
     }
+    if (prepareOnly && foreground) throw new Error('--prepare-only 与 --foreground 不能同时使用');
+    const research = researchConfig(researchId);
+    objective ||= research.objective;
     const limits = resolveBudget(budget, timeOnly);
     manifest(project);
-    for (const file of [
-      'common.hpp',
-      'reference.hpp',
-      'correctness.cpp',
-      'diagonal_workflow.cpp',
-      'benchmark_input.hpp',
-      'benchmark_input.cu',
-      'correctness_input.hpp',
-      'correctness_input.cu',
-    ])
+    if (!existsSync(join(project, research.sourceFile)))
+      throw new Error('缺少研究源码入口：' + research.sourceFile);
+    for (const file of research.testFiles)
       if (!existsSync(join(project, 'tests', file))) throw new Error('缺少专用验证文件：' + file);
     const id = randomUUID(),
       root = store.dir(id);
@@ -105,17 +110,9 @@ export async function kernelCli(input: string[]): Promise<void> {
     copySource(project, join(root, 'baseline'));
     mkdirSync(join(root, 'trusted/tests'), { recursive: true });
     cpSync(join(project, 'include'), join(root, 'trusted/include'), { recursive: true });
-    for (const file of [
-      'common.hpp',
-      'reference.hpp',
-      'correctness.cpp',
-      'diagonal_workflow.cpp',
-      'benchmark_input.hpp',
-      'benchmark_input.cu',
-      'correctness_input.hpp',
-      'correctness_input.cu',
-    ])
+    for (const file of research.testFiles)
       cpSync(join(project, 'tests', file), join(root, 'trusted/tests', file));
+    atomic(join(root, 'research-config.json'), research);
     atomic(join(root, 'trusted-manifest.json'), treeManifest(join(root, 'trusted')));
     const roles = {
       planner: loadRoleConfig(project, 'planner'),
@@ -124,6 +121,7 @@ export async function kernelCli(input: string[]): Promise<void> {
     };
     if (parsed.speed) for (const role of Object.values(roles)) role.speed = parsed.speed;
     const s: State = {
+      researchConfig: research,
       researchMode,
       researchPolicyStart: 1,
       sanitizerPolicy: 'family-final-v1',
@@ -131,8 +129,8 @@ export async function kernelCli(input: string[]): Promise<void> {
       timeOnly,
       testPolicy: 'split-gpu-v2',
       references: {
-        guide: '/root/gpuhpc-workspace/trtri-ref',
-        root: '/root/gpuhpc-workspace/references',
+        guide: research.guide,
+        root: research.sourceRoot,
       },
       objective,
       id,
@@ -147,8 +145,8 @@ export async function kernelCli(input: string[]): Promise<void> {
       calls: 0,
       tokens: 0,
       profile: smoke ? 'smoke' : 'full',
-      sizes: smoke ? [32] : [32, 64, 128, 256, 512, 1024],
-      blocks: [4],
+      sizes: smoke ? [32] : research.sizes,
+      blocks: research.id === 'direct-trsm' ? [] : [4],
       iterations: 20,
       roles,
       parent: join(root, 'baseline'),
@@ -164,6 +162,10 @@ export async function kernelCli(input: string[]): Promise<void> {
     atomic(join(root, 'baseline-manifest.json'), manifest(join(root, 'baseline')));
     atomic(join(root, 'control.json'), { action: 'run' });
     store.event(s, 'created', { project, budget: limits, profile: s.profile });
+    if (prepareOnly) {
+      console.log(`kernel ${id}\n已冻结配置与测试，尚未启动：sihq kernel resume ${id}`);
+      return;
+    }
     if (foreground) {
       console.log(`kernel ${id}`);
       await runKernel(id, store);
@@ -188,6 +190,59 @@ export async function kernelCli(input: string[]): Promise<void> {
   if (!id) throw new Error(help);
   const s = store.read(id),
     root = store.dir(id);
+  if (command === 'enable-numerical-diagnostics' && input.length === 2) {
+    const unlock = store.lock(id);
+    try {
+      const current = store.read(id);
+      const result = enableNumericalDiagnostics(current, root);
+      store.event(current, 'tests.diagnostics.upgraded', result);
+      console.log(JSON.stringify(result, null, 2));
+    } finally {
+      unlock();
+    }
+    return;
+  }
+  if (command === 'recovery-policy') {
+    if (input.length === 2) {
+      const policy = recoveryPolicy();
+      console.log(
+        JSON.stringify(
+          s.networkRetry ?? {
+            windowSeconds: policy.windowMs / 1000,
+            maxDelaySeconds: policy.maxDelayMs / 1000,
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    const unlock = store.lock(id);
+    try {
+      const current = store.read(id),
+        defaults = recoveryPolicy();
+      const policy = current.networkRetry ?? {
+        windowSeconds: defaults.windowMs / 1000,
+        maxDelaySeconds: defaults.maxDelayMs / 1000,
+      };
+      for (let i = 2; i < input.length; i += 2) {
+        const value = input[i + 1];
+        if (!value || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)))
+          throw new Error(help);
+        if (input[i] === '--window-seconds') policy.windowSeconds = Number(value);
+        else if (input[i] === '--max-delay-seconds' && Number(value) > 0)
+          policy.maxDelaySeconds = Number(value);
+        else throw new Error(help);
+      }
+      current.networkRetry = policy;
+      store.save(current);
+      store.event(current, 'recovery.policy.changed', policy);
+      console.log(JSON.stringify(policy, null, 2));
+    } finally {
+      unlock();
+    }
+    return;
+  }
   if (command === 'research-mode' && input.length === 3) {
     const mode = researchModeSchema.parse(input[2]);
     const unlock = store.lock(id);
@@ -231,10 +286,12 @@ export async function kernelCli(input: string[]): Promise<void> {
     try {
       const kind = input[2],
         targets = input[3]!.split(',');
+      let rhs: number[] | undefined;
       let sizes = [32],
         repeats = 3;
       for (let i = 4; i < input.length; i += 2) {
         if (input[i] === '--sizes') sizes = input[i + 1]!.split(',').map(Number);
+        else if (input[i] === '--rhs') rhs = input[i + 1]!.split(',').map(Number);
         else if (input[i] === '--repeats') repeats = Number(input[i + 1]);
         else throw new Error(help);
       }
@@ -249,7 +306,7 @@ export async function kernelCli(input: string[]): Promise<void> {
           root,
           {
             task: kind === 'paired' ? 'remeasure' : 'diagnose',
-            diagnostics: [{ kind, targets, sizes, repeats, reason: '人工明确请求诊断/复测' }],
+            diagnostics: [{ kind, targets, sizes, rhs, repeats, reason: '人工明确请求诊断/复测' }],
           },
           dest,
           controller.signal,
@@ -276,11 +333,27 @@ export async function kernelCli(input: string[]): Promise<void> {
     return;
   }
   if (command === 'status' && input.length === 2) {
+    const workerAlive = s.workerIdentity ? ownerAlive(s.workerIdentity) : alive(s.workerPid);
     console.log(
       JSON.stringify(
         {
           ...s,
-          workerAlive: alive(s.workerPid),
+          workerAlive,
+          recoveryRequired: ['running', 'closing'].includes(s.status) && !workerAlive,
+          execution: store
+            .journal(id)
+            .operations()
+            .slice(0, 5)
+            .map(({ result, before, attemptBefore, after, provider, ...operation }) => ({
+              ...operation,
+              provider: provider
+                ? {
+                    threadId: provider.threadId,
+                    turnId: provider.turnId,
+                    version: provider.version,
+                  }
+                : undefined,
+            })),
           control: JSON.parse(readFileSync(join(root, 'control.json'), 'utf8')),
         },
         null,
@@ -357,10 +430,20 @@ export async function kernelCli(input: string[]): Promise<void> {
       throw new Error('任务已结束或预算耗尽，请新建有预算的任务');
     // Probe the process lock before resetting a pending pause/stop request.
     const unlock = store.lock(id);
-    unlock();
-    for (const failure of Object.values(s.networkFailures ?? {})) failure.startedAt = Date.now();
-    store.save(s);
-    atomic(join(root, 'control.json'), { action: 'run' });
+    try {
+      const current = store.read(id);
+      for (const failure of Object.values(current.networkFailures ?? {}))
+        failure.startedAt = Date.now();
+      store.save(current);
+      const pending = existsSync(join(root, 'control.json'))
+        ? JSON.parse(readFileSync(join(root, 'control.json'), 'utf8'))
+        : {};
+      atomic(join(root, 'control.json'), {
+        action: current.closeout || pending.action === 'stop' ? 'stop' : 'run',
+      });
+    } finally {
+      unlock();
+    }
     if (input[2]) {
       await runKernel(id, store);
       const end = store.read(id);

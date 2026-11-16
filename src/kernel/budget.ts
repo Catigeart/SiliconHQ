@@ -1,4 +1,5 @@
 import { budgetSchema, type Budget } from './store.js';
+import { classify } from '../runtime/faults.js';
 export function reached(value: number, limit: number | null) {
   return limit !== null && value >= limit;
 }
@@ -21,19 +22,5 @@ export function resolveBudget(values: Record<string, number | null>, timeOnly: b
   });
 }
 export function transient(error: unknown): boolean {
-  if (error && typeof error === 'object') {
-    const e = error as { status?: number; code?: string; cause?: unknown };
-    if (e.status !== undefined) return [408, 429, 500, 502, 503, 504].includes(e.status);
-    if (
-      e.code &&
-      /^(ECONNRESET|ETIMEDOUT|EPIPE|ECONNREFUSED|EAI_AGAIN|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT)$/.test(
-        e.code,
-      )
-    )
-      return true;
-    if (e.cause && e.cause !== error && transient(e.cause)) return true;
-  }
-  return /\b(408|429|500|502|503|504)\b|ECONNRESET|ETIMEDOUT|temporarily unavailable|provider unavailable|network error|fetch failed|tls handshake.*(?:eof|timeout)|stream disconnected|connection (?:reset|closed)|unexpected eof/i.test(
-    String(error),
-  );
+  return ['retry', 'reconcile'].includes(classify(error).action);
 }

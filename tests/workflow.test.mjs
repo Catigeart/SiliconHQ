@@ -53,6 +53,9 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
         cwd: options.cwd ?? repo,
         env: {
           ...process.env,
+          SIHQ_CODEX_TRANSPORT: 'exec',
+          SIHQ_RECOVERY_WINDOW_MS: '0',
+          SIHQ_OUTPUT_CORRECTIONS: '0',
           HOME: root,
           PATH: bin + ':' + process.env.PATH,
           TEST_MODE: options.mode ?? mode,
@@ -290,15 +293,18 @@ test('resume exhausted workflow neither calls agents nor grants more repairs', (
     assert.equal(calls().length, count);
     assert.equal(flows.read(flow.id).repairCount, 1);
   }));
-test('resume regenerates invalid stage artifact with original session', () =>
+test('resume restores an invalid artifact from the durable result without another agent call', () =>
   fixture('pass', ({ invoke, flows, runs, calls }) => {
     assert.equal(invoke(['workflow', 'invalid artifact']).status, 0);
     const [flow] = flows.list();
     writeFileSync(join(runs.directory(flow.latestReviewRunId), 'review.json'), '{}');
     const count = calls().length;
     assert.equal(invoke(['workflow', 'resume', flow.id]).status, 0);
-    assert.equal(calls().length, count + 1);
-    assert.ok(calls().at(-1).args.includes('resume'));
+    assert.equal(calls().length, count);
+    assert.equal(
+      JSON.parse(readFileSync(join(runs.directory(flow.latestReviewRunId), 'review.json'))).verdict,
+      'passed',
+    );
   }));
 test('active workflow lock rejects resume without altering records', () =>
   fixture('pass', ({ invoke, flows, calls }) => {

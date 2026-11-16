@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import type { Speed } from '../config/speed.js';
 import { atomicJson, dataDirectory, lockFile, recordDirectory } from './files.js';
 import { type Run } from './runs.js';
+import { Journal } from '../runtime/journal.js';
+import { workflowRecordSchema } from './schemas.js';
 
 export type WorkflowStep = {
   stage: Workflow['stage'];
@@ -87,11 +89,11 @@ export class WorkflowStore {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     flow.updatedAt = new Date().toISOString();
     const file = join(dir, 'workflow.json');
-    atomicJson(file, flow);
+    new Journal(dir).checkpoint('workflow.json', flow);
   }
   read(id: string): Workflow {
-    const flow = JSON.parse(
-      readFileSync(join(this.directory(id), 'workflow.json'), 'utf8'),
+    const flow = workflowRecordSchema.parse(
+      new Journal(this.directory(id)).readCheckpoint('workflow.json'),
     ) as Workflow;
     if (
       flow.id !== id ||

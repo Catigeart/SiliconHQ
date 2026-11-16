@@ -1,3 +1,4 @@
+import { researchConfig } from '../dist/kernel/research-config.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
@@ -505,6 +506,28 @@ test('time expiry cancels current work then runs planner closeout outside expire
     assert.equal(end.results[0].eligible, false);
     assert.ok(end.closeout.seconds >= 1);
     assert.match(readFileSync(join(f.dir, 'summary.txt'), 'utf8'), /deadline summary/);
+  } finally {
+    f.cleanup();
+  }
+});
+test('invalid closeout output is corrected without restarting experiments', async () => {
+  const f = fixture({ budget: { seconds: 10 } });
+  try {
+    const state = f.store.read(f.id);
+    state.usedSeconds = 10;
+    f.store.save(state);
+    let tries = 0;
+    const base = f.deps.agent;
+    f.deps.agent = async (...args) => {
+      assert.equal(args[2].kind, 'closeout');
+      if (++tries === 1) return { summary: 'missing required fields' };
+      return base(...args);
+    };
+    await f.run();
+    assert.equal(tries, 2);
+    assert.equal(f.store.read(f.id).closeout.status, 'completed');
+    assert.equal(f.store.read(f.id).status, 'budget_exhausted');
+    assert.equal(f.checks.length, 0);
   } finally {
     f.cleanup();
   }
@@ -1450,6 +1473,58 @@ test('legacy cached final decision missing familyAction is corrected without rer
     assert.equal(feedbacks, 2);
     assert.equal(count(), 1);
     assert.equal(f.checks.length, 3);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('direct-trsm reuses five-stage archive/resume and compares separate RHS points', async () => {
+  const f = fixture({ action: 'stop' });
+  try {
+    const state = f.store.read(f.id);
+    state.researchConfig = researchConfig('direct-trsm');
+    state.roles.developer.speed = 'standard';
+    f.store.save(state);
+    const verify = f.deps.verify;
+    f.deps.verify = async (...args) => {
+      const e = await verify(...args);
+      e.performance = args[4]
+        ? [1, 4096].map((nrhs, i) => ({
+            n: 32,
+            nrhs,
+            uplo: 0,
+            diag: 0,
+            samples: [i + 1],
+            medianUs: i + 1,
+          }))
+        : [];
+      atomic(join(args[3], 'evidence.json'), e);
+      return e;
+    };
+    const agent = f.deps.agent;
+    f.deps.agent = async (...args) => {
+      const out = await agent(...args);
+      if (args[2].kind === 'develop') atomic(join(f.dir, 'control.json'), { action: 'pause' });
+      return out;
+    };
+    await f.run();
+    assert.equal(f.store.read(f.id).status, 'paused');
+    atomic(join(f.dir, 'control.json'), { action: 'run' });
+    await f.run();
+    const end = f.store.read(f.id);
+    assert.equal(end.status, 'completed');
+    assert.equal(end.researchConfig.id, 'direct-trsm');
+    assert.equal(end.roles.developer.speed, 'standard');
+    assert.equal(f.calls.filter((x) => x === 'develop').length, 1);
+    assert.deepEqual(f.calls, ['plan', 'develop', 'review', 'refactor', 'final_review', 'decide']);
+    const result = JSON.parse(readFileSync(join(f.dir, 'experiments/1/comparison.json')));
+    assert.deepEqual(
+      result.comparison.map((row) => row.speedup),
+      [1, 1],
+    );
+    assert.ok(existsSync(join(f.dir, 'experiments/1/archived/src/kernel.cu')));
+    assert.match(readFileSync(join(f.dir, 'experiments/1/comparison.json'), 'utf8'), /4096/);
+    assert.match(readFileSync(join(f.dir, 'experiments/1/EXPERIMENT.md'), 'utf8'), /32 × 4096/);
   } finally {
     f.cleanup();
   }

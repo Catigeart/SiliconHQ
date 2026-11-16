@@ -81,6 +81,7 @@ test('lock exclusion and idempotent release do not remove a subsequent lock', ()
 test('kernel migrates unversioned state and rejects corrupt or future records', () =>
   temporary((root) => {
     const { store, id, state } = kernelFixture(root);
+    rmSync(store.journal(id).file, { force: true });
     delete state.schemaVersion;
     const file = join(store.dir(id), 'state.json');
     atomicJson(file, state);
@@ -101,7 +102,12 @@ for (const failure of ['read', 'start', 'finish', 'event'])
     temporary(async (root) => {
       const { store, id } = kernelFixture(root);
       const signals = ['SIGINT', 'SIGTERM'].map((name) => process.listenerCount(name));
-      if (failure === 'read') writeFileSync(join(store.dir(id), 'state.json'), '{');
+      if (failure === 'read')
+        store
+          .journal(id)
+          .transaction((db) =>
+            db.prepare("UPDATE checkpoints SET value='{' WHERE name='state.json'").run(),
+          );
       if (failure === 'start')
         store.save = () => {
           throw new Error('start failed');

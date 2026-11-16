@@ -42,7 +42,15 @@ emit({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}});
 `,
     { mode: 0o755 },
   );
-  const env = { ...process.env, HOME: root, PATH: bin + ':' + process.env.PATH, CHAT_MODE: mode };
+  const env = {
+    ...process.env,
+    SIHQ_CODEX_TRANSPORT: 'exec',
+    SIHQ_RECOVERY_WINDOW_MS: '0',
+    SIHQ_OUTPUT_CORRECTIONS: '0',
+    HOME: root,
+    PATH: bin + ':' + process.env.PATH,
+    CHAT_MODE: mode,
+  };
   const cli = resolve('dist/cli.js');
   return {
     root,
@@ -141,7 +149,7 @@ test('invalid slash commands and failed resume leave the input loop usable', () 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /未知命令/);
     assert.match(result.stdout, /用法：\/workflow/);
-    assert.match(result.stdout, /无效的 workflow-id/);
+    assert.match(result.stdout, /无效的记录 ID/);
     assert.match(result.stdout, /还没有流程/);
     assert.equal(f.calls().length, 1);
   } finally {

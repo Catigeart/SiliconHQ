@@ -4,6 +4,7 @@ import { reached } from './budget.js';
 import { KernelStore, readJson, type Stage, type State } from './store.js';
 
 import type { Dependencies } from './runtime-types.js';
+import { processIdentity } from '../runtime/identity.js';
 export function createKernelRuntime(s: State, store: KernelStore, deps: Dependencies) {
   const root = store.dir(s.id);
   const abort = new AbortController();
@@ -52,7 +53,9 @@ export function createKernelRuntime(s: State, store: KernelStore, deps: Dependen
     process.on('SIGINT', interrupt);
     s.status = 'running';
     s.workerPid = process.pid;
+    s.workerIdentity = processIdentity();
     delete s.error;
+    delete s.failure;
     store.save(s);
     heartbeat = setInterval(() => {
       try {
@@ -76,6 +79,7 @@ export function createKernelRuntime(s: State, store: KernelStore, deps: Dependen
   function finish() {
     updateTime();
     delete s.workerPid;
+    delete s.workerIdentity;
     store.save(s);
     store.event(s, 'worker.finished', { status: s.status });
   }

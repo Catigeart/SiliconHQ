@@ -114,7 +114,14 @@ for(const event of [{type:'thread.started',thread_id:'review-thread'},{type:'ite
     const invoke = (args) =>
       spawnSync(process.execPath, [resolve('dist/cli.js'), ...args], {
         cwd: root,
-        env: { ...process.env, HOME: root, PATH: bin + ':' + process.env.PATH },
+        env: {
+          ...process.env,
+          SIHQ_CODEX_TRANSPORT: 'exec',
+          SIHQ_RECOVERY_WINDOW_MS: '0',
+          SIHQ_OUTPUT_CORRECTIONS: '0',
+          HOME: root,
+          PATH: bin + ':' + process.env.PATH,
+        },
         encoding: 'utf8',
       });
     assert.equal(invoke(['review']).status, 2);

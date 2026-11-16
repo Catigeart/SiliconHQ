@@ -84,9 +84,9 @@ ${checks || '未执行代码验证；诊断任务不产生新的正确性结论�
 
 sanitizer：${san?.status ?? 'not_run'}；实际执行 ${san?.cases?.filter((c: any) => !c.reused).length ?? 0} 项，复用 ${san?.cases?.filter((c: any) => c.reused).length ?? 0} 项。
 
-| nb | 本轮 μs | 基线 μs | 基线/本轮 | 父方案 μs | 父方案/本轮 |
+| 规模（nb 或 n × nrhs） | 本轮 μs | 基线 μs | 基线/本轮 | 父方案 μs | 父方案/本轮 |
 |---:|---:|---:|---:|---:|---:|
-${performance.map((p: any) => `| ${p.nb} | ${p.medianUs?.toFixed(3)} | ${p.baselineUs?.toFixed(3) ?? '—'} | ${p.speedup?.toFixed(3) ?? '—'} | ${p.parentUs?.toFixed(3) ?? '—'} | ${p.parentSpeedup?.toFixed(3) ?? '—'} |`).join('\n')}
+${performance.map((p: any) => `| ${p.n !== undefined ? `${p.n} × ${p.nrhs}` : p.nb} | ${p.medianUs?.toFixed(3)} | ${p.baselineUs?.toFixed(3) ?? '—'} | ${p.speedup?.toFixed(3) ?? '—'} | ${p.parentUs?.toFixed(3) ?? '—'} | ${p.parentSpeedup?.toFixed(3) ?? '—'} |`).join('\n')}
 
 ${familyValidation ? `归档代表最终验证：${familyValidation.passed ? '全部通过' : '未全部通过'}；详见 [family-validation.json](family-validation.json)。` : ''}
 

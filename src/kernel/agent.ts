@@ -1,3 +1,4 @@
+import { researchFor } from './research-config.js';
 import { appendFileSync } from 'node:fs';
 import { z } from 'zod';
 import { runCodex } from '../adapters/codex.js';
@@ -5,10 +6,11 @@ import { codexSchema, restoreOptionalFields } from './model-schema.js';
 import { buildKernelPrompt } from './prompts.js';
 import { changeKindSchema, outcomeSchema, portingGuideSchema, questionSchema } from './research.js';
 import { KernelStore, type State } from './store.js';
+import { executionScope } from '../runtime/context.js';
 
 const text = z.string().min(1);
 export const diagnosticSchema = z.strictObject({
-  kind: z.enum(['codegen', 'kernels', 'paired']),
+  kind: z.enum(['codegen', 'kernels', 'paired', 'numerical']),
   targets: z
     .array(z.string().regex(/^(baseline|[1-9][0-9]*)$/))
     .min(1)
@@ -22,6 +24,16 @@ export const diagnosticSchema = z.strictObject({
     )
     .min(1)
     .max(6),
+  rhs: z
+    .array(
+      z
+        .number()
+        .int()
+        .refine((n) => [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096].includes(n)),
+    )
+    .min(1)
+    .max(13)
+    .optional(),
   repeats: z.number().int().min(1).max(5),
   refresh: z.boolean().optional(),
   reason: text,
@@ -156,13 +168,25 @@ export async function agent(
   const writable = input.kind === 'develop' || input.kind === 'refactor';
   const applicationSchema = z.toJSONSchema(schema);
   let answer = '';
-  await runCodex(buildKernelPrompt(input), signal, {
+  const parseAnswer = (answer: string) => {
+    const result = schema.parse(restoreOptionalFields(JSON.parse(answer), applicationSchema));
+    if ('verdict' in result && result.verdict === 'passed' && result.findings.length)
+      throw new Error('审阅通过结论与问题列表矛盾');
+    return result;
+  };
+  answer = await runCodex(buildKernelPrompt(input, researchFor(s)), signal, {
     cwd: input.cwd,
     ...config,
     threadId: s.threads[key],
     sandboxMode: writable ? 'workspace-write' : 'read-only',
     approvalPolicy: 'never',
     outputSchema: codexSchema(applicationSchema),
+    validateOutput: parseAnswer,
+    onRawEvent: (event) =>
+      appendFileSync(
+        input.output.replace('.events.jsonl', '.wire.jsonl'),
+        JSON.stringify({ at: new Date().toISOString(), event }) + '\n',
+      ),
     renderEvent: () => {},
     onEvent: (event) => {
       appendFileSync(input.output, JSON.stringify({ at: new Date().toISOString(), event }) + '\n');
@@ -180,13 +204,17 @@ export async function agent(
       if (event.type === 'item.completed' && event.item.type === 'agent_message')
         answer = event.item.text;
       if (event.type === 'turn.completed') {
-        s.tokens += event.usage.input_tokens + event.usage.output_tokens;
+        const scope = executionScope.getStore();
+        const usageId =
+          scope?.operation.provider?.turnId ?? `${scope?.operation.id}:${scope?.operation.attempt}`;
+        s.accountedTurns ??= [];
+        if (!s.accountedTurns.includes(usageId)) {
+          s.tokens += event.usage.input_tokens + event.usage.output_tokens;
+          s.accountedTurns.push(usageId);
+        }
         store.save(s);
       }
     },
   });
-  const result = schema.parse(restoreOptionalFields(JSON.parse(answer), applicationSchema));
-  if ('verdict' in result && result.verdict === 'passed' && result.findings.length)
-    throw new Error('审阅通过结论与问题列表矛盾');
-  return result;
+  return parseAnswer(answer);
 }
