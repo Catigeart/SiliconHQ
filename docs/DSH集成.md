@@ -51,7 +51,7 @@ DSH 的 workflow 工具适合由主 Agent 编写并执行编排脚本。SiliconH
 
 Visual Workflow 的节点执行器要求当前会话的主 Agent 取得活动流程，维护自己的运行锁、快照和恢复语义。Workflow Lite 把画布编译成计划提示词。SiliconHQ 需要由指定 provider 提交结构化报告、由程序判断验收结果，并在写入结果不确定时等待显式重试。因此模板编辑器使用 DSH 插件设置表单，保存到同一个 profile，执行时复用 SiliconHQ 已有的锁、报告校验和检查点。每次启动冻结步骤、输入及退回路径。[Visual Workflow 节点执行源码](https://github.com/GZX2211/dsh-Visual-Workflow/blob/4cd99b20713ef2a488522ccf5a95807274a1a6ab/src/host/orchestrator/runtime-execute.ts) · [Workflow Lite](https://github.com/xiaoso456/dsh-workflow-lite/tree/4723891c8565d90e4d66a488c31bfd792c0aadf2)
 
-**Product Subagents** 提供 Codex、Claude 等产品后端，并有自己的兼容性测试说明。使用其他 provider 时，应按当前 profile 核实它的注册名、角色权限、结构化输出能力及是否能继续原会话。本版本使用 DSH 官方 provider，并为 Codex 的只读沙箱提供一个小型 provider。在隔离 profile 中，DSH `0.2.2-rc.5` 的插件管理器按发布包声明的依赖范围拒绝安装 `dsh-plugin-product-subagents@0.4.0`。当前版本继续使用官方 providers。[Product Subagents](https://github.com/shaokeyibb/dsh-plugin-product-subagents)
+**Product Subagents** 可以作为当前 DSH profile 的外部后端。隔离验收中，DSH `0.2.2-rc.5` 的插件管理器按依赖范围拒绝安装社区版 `0.4.0`。`0.4.1` 已与 SiliconHQ 一同安装并完成工作目录对照测试。各后端的注册名、权限和模型覆盖能力以当前 profile 为准。[Product Subagents](https://github.com/shaokeyibb/dsh-plugin-product-subagents)
 
 纯只读模板在同一工作区可并行运行。含开发或验证命令的模板、内置开发流程占用独占锁。DSH Jobs 接收入场后的步骤进度；子 Agent 派发获准后才计入自动修复预算。开发仍有未完成事项时，独立审查通过后保留「开发未完成」，供下一轮处理。
 
