@@ -1,3 +1,4 @@
+import { archiveCurrentRound } from '../storage/workflows.js';
 import { blockingReviewSchema, recheckInstructions } from '../roles/reviewer.js';
 import { roundConclusion, unfinishedWork, canContinueRound, canResumeRound } from './rules.js';
 import { randomUUID } from 'node:crypto';
@@ -445,7 +446,7 @@ export async function continueWorkflow(
   flows.readCurrent(id);
   const releaseFlow = flows.lock(id);
   try {
-    const previous = flows.read(id);
+    const previous = flows.readCurrent(id);
     assertWorkflowOwner(previous, deps);
     if (deps.expectedRound !== undefined && deps.expectedRound !== (previous.round ?? 1))
       throw new Error('轮次已更新，请重新预览');
@@ -474,7 +475,6 @@ export async function continueWorkflow(
         const unlock = runs.lock(runId);
         unlock();
       }
-      const { rounds = [], ...snapshot } = previous;
       const flow: Workflow = {
         ...(previous.dsh && { dsh: deps.dsh ?? previous.dsh }),
         speedOverride: speed ?? previous.speedOverride,
@@ -484,7 +484,7 @@ export async function continueWorkflow(
         updatedAt: '',
         prompt: prompt.trim(),
         round: (previous.round ?? 1) + 1,
-        rounds: [...rounds, snapshot],
+        ...archiveCurrentRound(previous),
         ...(inheritReports && { previousRoleRunIds: roleIds }),
         status: 'running',
         stage: 'plan',

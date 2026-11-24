@@ -338,3 +338,15 @@ test('every registry path requires evidence from the owning shell producer', asy
     await stopVerificationJob(ctx, owner, 'j');
   }
 });
+
+test('host sandbox preparation errors preserve their code without triggering a repair', async () => {
+  const ctx = fixture(() => ({
+    isError: true,
+    error: { message: 'fixture diagnostic', info: { code: 'SANDBOX_PREPARATION_FAILED' } },
+  }));
+  const report = await executeVerification(ctx, parent, cwd, defaultCommand, freshSignal());
+  assert.equal(report.hostErrorCode, 'SANDBOX_PREPARATION_FAILED');
+  assert.match(report.summary, /沙箱准备失败.*未启动/);
+  assert.equal(report.commandFailed, false);
+  assert.equal(report.exitCode, null);
+});

@@ -49,7 +49,7 @@ test('history isolates malformed legacy SQLite JSON without falling back to its 
   assert.equal(page.total, 1);
 });
 
-test('history still reports unrelated SQLite schema errors', (t) => {
+test('history isolates an incompatible schema and retries after an exclusive lock', (t) => {
   const { root, cwd, record } = setup(t);
   const broken = record();
   const db = new DatabaseSync(join(broken.dir, 'runtime.sqlite'));
@@ -58,5 +58,28 @@ test('history still reports unrelated SQLite schema errors', (t) => {
   } finally {
     db.close();
   }
-  assert.throws(() => listWorkflowPage(root, cwd), { code: 'ERR_SQLITE_ERROR' });
+  const good = record();
+  const page = listWorkflowPage(root, cwd);
+  assert.equal(page.partial, true);
+  assert.deepEqual(
+    page.items.map((item) => item.id),
+    [good.flow.id],
+  );
+  const busy = new DatabaseSync(join(broken.dir, 'runtime.sqlite'));
+  try {
+    busy.exec(
+      'DROP TABLE checkpoints; CREATE TABLE checkpoints(name TEXT, value TEXT); BEGIN EXCLUSIVE',
+    );
+    busy
+      .prepare('INSERT INTO checkpoints VALUES (?,?)')
+      .run('workflow.json', JSON.stringify(broken.flow));
+    assert.deepEqual(
+      listWorkflowPage(root, cwd).items.map((item) => item.id),
+      [good.flow.id],
+    );
+    busy.exec('COMMIT');
+    assert.equal(listWorkflowPage(root, cwd).total, 2);
+  } finally {
+    busy.close();
+  }
 });

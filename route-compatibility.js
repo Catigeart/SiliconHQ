@@ -24,3 +24,15 @@ export function supportsRoute(base, route, read, named = true) {
     (named && !!base.product)
   );
 }
+
+export const instanceSettingKeys = [
+  'backend',
+  'provider',
+  'model',
+  'reasoningEffort',
+  'product',
+  'agentPreset',
+];
+export function sameInstanceRoute(a, b) {
+  return !!a && !!b && instanceSettingKeys.every((key) => (a[key] || '') === (b[key] || ''));
+}

@@ -51,7 +51,7 @@ export function readWorkflowProjection<T>(directory: string, read: (db: Database
   if (existsSync(file)) {
     const db = new DatabaseSync(file, { readOnly: true });
     try {
-      db.exec('PRAGMA busy_timeout=5000; BEGIN DEFERRED');
+      db.exec('PRAGMA busy_timeout=0; BEGIN DEFERRED');
       if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoints'").get())
         return read(db);
     } finally {
@@ -126,23 +126,33 @@ function refreshIndex(root: string) {
     indexes.set(root, index);
     if (indexes.size > 8) indexes.delete(indexes.keys().next().value!);
   }
+  let partial = false;
   const seen = new Set<string>();
   for (const entry of existsSync(root) ? readdirSync(root, { withFileTypes: true }) : []) {
     if (!entry.isDirectory() || !/^[\da-f-]{36}$/.test(entry.name)) continue;
     const dir = join(root, entry.name);
     // CLI and earlier versions write the same records. Include the WAL and the legacy JSON export.
-    const stamp = workflowFileStamp(dir);
     seen.add(entry.name);
-    if (index.records.get(entry.name)?.stamp === stamp) continue;
+    let stamp: string;
     let row: WorkflowSummary | undefined;
     try {
+      stamp = workflowFileStamp(dir);
+      if (index.records.get(entry.name)?.stamp === stamp) continue;
       row = readSummary(dir);
     } catch (error) {
       const e = error as { code?: string; errcode?: number };
       if (
-        !(error instanceof SyntaxError || e.code === 'ENOENT' || [11, 26].includes(e.errcode ?? 0))
+        !(
+          error instanceof SyntaxError ||
+          ['ENOENT', 'EACCES', 'EPERM', 'EBUSY'].includes(e.code ?? '') ||
+          [1, 5, 6, 11, 26].includes((e.errcode ?? 0) & 255)
+        )
       )
         throw error;
+      // Never serve a stale row or memoize a failure across lock release.
+      partial = true;
+      if (index.records.delete(entry.name)) index.pages.clear();
+      continue;
     }
     index.records.set(entry.name, {
       stamp,
@@ -168,7 +178,7 @@ function refreshIndex(root: string) {
       index.paths.clear();
       break;
     }
-  return index;
+  return { index, partial };
 }
 export function listWorkflowPage(root: string, cwd: string, options: HistoryPageOptions = {}) {
   const { session, offset = 0, limit = 25 } = options;
@@ -180,7 +190,7 @@ export function listWorkflowPage(root: string, cwd: string, options: HistoryPage
     limit > 100
   )
     throw new Error('无效的流程历史分页参数');
-  const index = refreshIndex(root);
+  const { index, partial } = refreshIndex(root);
   const project = projectDirectoryKey(cwd);
   const scope = JSON.stringify([project, session]);
   let items = index.pages.get(scope);
@@ -200,6 +210,7 @@ export function listWorkflowPage(root: string, cwd: string, options: HistoryPage
   return {
     items: items.slice(offset, end).map((item) => ({ ...item })),
     total: items.length,
+    ...(partial && { partial: true }),
     nextOffset: end < items.length ? end : null,
   };
 }

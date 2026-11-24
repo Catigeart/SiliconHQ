@@ -794,3 +794,24 @@ test('template retry obeys the attempt displayed on each page', async (t) => {
     };
   });
 });
+
+test('continuation appends one snapshot without reading full archived history', async (t) => {
+  const f = fixture(t, [step('one')]);
+  let flow = await f.run({ action: 'start', prompt: '1' });
+  const original = WorkflowStore.prototype.read;
+  WorkflowStore.prototype.read = () => assert.fail('continuation read archived rounds');
+  try {
+    for (let i = 2; i <= 4; i++)
+      flow = await f.run({ action: 'continue', id: flow.id, prompt: String(i) });
+  } finally {
+    WorkflowStore.prototype.read = original;
+  }
+  const { flows } = f.stores();
+  assert.equal(flows.readCurrent(flow.id).archivedRounds, 3);
+  const snapshots = flows.read(flow.id).rounds;
+  assert.deepEqual(
+    snapshots.map((s) => s.prompt),
+    ['1', '2', '3'],
+  );
+  assert.ok(snapshots.every((s) => !('archivedRounds' in s)));
+});

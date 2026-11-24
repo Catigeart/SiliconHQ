@@ -1,6 +1,7 @@
 import { delegationDepthOptions } from './delegation-depth.js';
 import { readonlyCodex } from './codex-backend.js';
 import {
+  checkProductWorkspace,
   developmentRestriction,
   externalBridge,
   productEntries,
@@ -14,8 +15,15 @@ import {
   usesHostModels,
 } from './model-route.js';
 
-/** @param {any} service @param {any} route @param {boolean} readOnly @param {any} [ctx] @param {any} [parent] */
-export function routeFor(service, route, readOnly, ctx = undefined, parent = undefined) {
+/** @param {any} service @param {any} route @param {boolean} readOnly @param {any} [ctx] @param {any} [parent] @param {string} [cwd] */
+export function routeFor(
+  service,
+  route,
+  readOnly,
+  ctx = undefined,
+  parent = undefined,
+  cwd = undefined,
+) {
   const product = ctx && productEntries(ctx).get(route.baseBackend ?? route.backend);
   if (ctx && route.product && route.product !== product?.product)
     throw new Error('产品后端绑定已变化，请重新选择基础后端');
@@ -47,6 +55,7 @@ export function routeFor(service, route, readOnly, ctx = undefined, parent = und
         route.backend +
         '”。请在插件页启用或更正其注册名。',
     );
+  if (!readOnly && ctx) checkProductWorkspace(ctx, provider, parent, cwd);
   const caps = provider.capabilities;
   if (route.agentPreset) {
     if (!caps.agentPreset || provider.inheritsParentContext)
@@ -101,15 +110,17 @@ export function routeFor(service, route, readOnly, ctx = undefined, parent = und
 }
 
 // Health checks, workflow preflight and every fresh dispatch validate the effective spec.
+/** @param {{cwd?: string, includeCatalog?: boolean}} [options] */
 export async function checkedRoute(
   ctx,
   service,
   route,
   readOnly,
   parent = undefined,
-  includeCatalog = false,
+  options = {},
 ) {
-  const spec = routeFor(service, route, readOnly, ctx, parent);
+  const { includeCatalog = false, cwd } = options;
+  const spec = routeFor(service, route, readOnly, ctx, parent, cwd);
   await validatePreset(ctx, spec.agentPreset);
   const instance =
     route.backend === externalBridge

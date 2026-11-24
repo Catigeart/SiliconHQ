@@ -100,3 +100,46 @@ test('one-shot third-party options use the backend namespace consistently', asyn
     'unconfirmed',
   );
 });
+
+test('renaming the same failed instance is excluded while an equivalent separate instance can be selected', async () => {
+  const { reassignmentOptions } = await import('../workflow-reassignment.js');
+  const config = {
+    agentInstances: [
+      { id: 'writer', name: 'New label', backend: 'spawn' },
+      { id: 'backup', name: 'Backup', backend: 'spawn' },
+    ],
+  };
+  const flow = {
+    status: 'failed',
+    cwd: process.cwd(),
+    dsh: {
+      session: 's',
+      roles: {
+        developer: {
+          backend: 'spawn',
+          baseBackend: 'spawn',
+          instanceId: 'writer',
+          instanceName: 'Old label',
+          model: '',
+        },
+      },
+    },
+    steps: [{ stage: 'implement', status: 'failed', executionId: 'attempt' }],
+  };
+  const ctx = {
+    get: (key) =>
+      key === 'subagents'
+        ? { getProvider: () => ({ name: 'spawn', capabilities: { agentOptions: true } }) }
+        : undefined,
+  };
+  const { options, excluded } = await reassignmentOptions(ctx, config, flow, 'attempt');
+  assert.deepEqual(
+    options.map((o) => o.id),
+    ['backup'],
+  );
+  assert.deepEqual(
+    excluded.map((o) => o.id),
+    ['writer'],
+  );
+  assert.match(excluded[0].reason, /不同的执行实例/);
+});

@@ -8,7 +8,12 @@ import { PassThrough } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
-import { externalBridge, productStart, selectProductSpec } from '../product-adapter.js';
+import {
+  checkProductWorkspace,
+  externalBridge,
+  productStart,
+  selectProductSpec,
+} from '../product-adapter.js';
 
 function configuredHost(product, config, apply) {
   const entry = {
@@ -216,3 +221,21 @@ test(
     assert.equal(entry.config.env.CLAUDE_CODE_EFFORT_LEVEL, undefined);
   },
 );
+
+test('Product Subagents checkout guard follows mounted namespaces and preserves unrelated providers', () => {
+  const parent = { session: { header: { cwd: process.cwd() } } };
+  const target = resolve(process.cwd(), '..');
+  const entry = {
+    options: { name: 'dsh-plugin-product-subagents', config: { providers: { writer: {} } } },
+    fiber: { state: 2, resolveConfig: (c) => c },
+  };
+  const ctx = { get: (name) => name === 'loader' && { entries: () => [entry] } };
+  const provider = (name) => ({ name, prepareContinuable() {} });
+  for (const namespace of ['product-subagents', 'local', '']) {
+    entry.options.config.providerNamespace = namespace;
+    const matched = provider((namespace ? namespace + ':' : '') + 'writer');
+    assert.throws(() => checkProductWorkspace(ctx, matched, parent, target), /目标目录新建聊天/);
+    checkProductWorkspace(ctx, matched, parent, process.cwd());
+    checkProductWorkspace(ctx, provider('elsewhere:writer'), parent, target);
+  }
+});

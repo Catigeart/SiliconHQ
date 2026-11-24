@@ -111,13 +111,17 @@ function apply(ctx) {
         }
         const draft = option.id === draftOption ? trial : null;
         if (option.id === draftOption && !draft) throw new Error('草稿已失效，请重新试用。');
-        const plan = await call('prepareLaunch', {
+        const request = {
           sessionId,
           selected: draft?.id ?? option.id.slice(savedOptionPrefix.length),
           ...(draft && { draft: draft.draft }),
-        });
-        if (!draft) plan.command = exampleCommand(plan.flow);
-        openLaunchDialog(sessionId, plan, false);
+        };
+        const prepare = async (replaces = undefined) => {
+          const plan = await call('prepareLaunch', { ...request, replaces });
+          if (!draft) plan.command = exampleCommand(plan.flow);
+          return plan;
+        };
+        openLaunchDialog(sessionId, await prepare(), false, prepare);
       },
     },
   });

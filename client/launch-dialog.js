@@ -46,10 +46,40 @@ function Preflight({ report }) {
   );
 }
 
-function LaunchDialog({ plan, loadSources, submit, continuation, close, documents }) {
+function RefreshableDialog({ initial, prepare, ...props }) {
+  const [current, setCurrent] = React.useState(initial);
+  const [task, setTask] = React.useState('');
+  async function refresh() {
+    setCurrent(await prepare(current.plan.token));
+  }
+  return h(LaunchDialog, {
+    key: current.plan.token,
+    ...props,
+    ...current,
+    task,
+    setTask,
+    refresh,
+    refreshed: current !== initial,
+  });
+}
+
+function LaunchDialog({
+  plan,
+  loadSources,
+  submit,
+  continuation,
+  close,
+  documents,
+  refresh,
+  refreshed,
+  task,
+  setTask,
+  openHistory,
+}) {
   const { flow, cwd } = plan;
   const [inheritReports, setInheritReports] = React.useState(false);
-  const [task, setTask] = React.useState('');
+  const [uncertain, setUncertain] = React.useState(false);
+  const [refreshing, setRefreshing] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState('');
   const [copyNotice, setCopyNotice] = React.useState('');
@@ -59,7 +89,9 @@ function LaunchDialog({ plan, loadSources, submit, continuation, close, document
   const context = useLaunchContext(loadSources, plan.diffRequired, submitting, documents);
 
   let blocked = context.blocked;
-  if (!cwd) blocked = '请先为当前聊天关联本地项目。';
+  if (uncertain) blocked = '提交结果尚未确认，请查看本会话运行记录。';
+  else if (refreshing) blocked = '正在重新检查…';
+  else if (!cwd) blocked = '请先为当前聊天关联本地项目。';
   else if (flow.preflight?.ok === false) blocked = '请先解决启动前检查中的问题。';
   else if (!blocked && !task.trim())
     blocked = continuation ? '请输入本轮追加需求。' : '请输入任务描述。';
@@ -76,7 +108,10 @@ function LaunchDialog({ plan, loadSources, submit, continuation, close, document
     } catch (failure) {
       inFlight.current = false;
       setSubmitting(false);
-      setError(failure.message);
+      setUncertain(!!failure.deliveryUnknown);
+      setError(
+        failure.deliveryUnknown ? '提交结果尚未确认，请查看本会话运行记录。' : failure.message,
+      );
     }
   }
 
@@ -87,6 +122,38 @@ function LaunchDialog({ plan, loadSources, submit, continuation, close, document
     h(
       'div',
       { className: 'sihq-launch-actions' },
+      uncertain
+        ? h(
+            Button,
+            {
+              variant: 'ghost',
+              onClick: () => {
+                close();
+                openHistory();
+              },
+            },
+            '查看运行记录',
+          )
+        : h(
+            Button,
+            {
+              variant: 'ghost',
+              disabled: submitting || refreshing,
+              onClick: async () => {
+                if (inFlight.current) return;
+                inFlight.current = true;
+                setRefreshing(true);
+                try {
+                  await refresh();
+                } catch (error) {
+                  setError(error.message);
+                  setRefreshing(false);
+                  inFlight.current = false;
+                }
+              },
+            },
+            '重新检查',
+          ),
       h(Button, { variant: 'ghost', onClick: close }, submitting ? '关闭' : '取消'),
       h(
         Button,
@@ -165,6 +232,8 @@ function LaunchDialog({ plan, loadSources, submit, continuation, close, document
             ),
           ),
         ),
+      refreshed &&
+        h('small', { role: 'status' }, '已重新检查，任务文字已保留。请重新核对本轮引用。'),
       h(Preflight, { report: flow.preflight }),
       flow.inheritsParentHistory &&
         h('small', null, '本流程的 fork Agent 还会继承父会话已完成轮次的历史。'),
@@ -177,7 +246,8 @@ function LaunchDialog({ plan, loadSources, submit, continuation, close, document
 // the session scope owns the React root until dismissal or session teardown.
 export function createTaskDialog() {
   let active;
-  return (scope, plan, loadSources, submit, continuation, documents) => {
+  return (scope, initial, continuation, prepare, openHistory) => {
+    const { plan } = initial;
     if (active?.token === plan.token && active.scope === scope) return;
     active?.close();
     const close = () => {
@@ -185,7 +255,7 @@ export function createTaskDialog() {
     };
     const dispose = scope.effect(() => {
       const root = createRoot(document.createElement('div'));
-      root.render(h(LaunchDialog, { plan, loadSources, submit, continuation, close, documents }));
+      root.render(h(RefreshableDialog, { initial, prepare, continuation, close, openHistory }));
       return () => {
         if (active?.close === close) active = undefined;
         root.unmount();

@@ -56,3 +56,7 @@ Visual Workflow 的节点执行器要求当前会话的主 Agent 取得活动流
 纯只读模板在同一工作区可并行运行。含开发或验证命令的模板、内置开发流程占用独占锁。DSH Jobs 接收入场后的步骤进度；子 Agent 派发获准后才计入自动修复预算。开发仍有未完成事项时，独立审查通过后保留「开发未完成」，供下一轮处理。
 
 聊天直输指令通过 DSH 会话事件的 `sourceEventSeq` 关联 Job 和流程。历史列表按项目与会话筛选，首次访问从已有记录构建内存索引，随后仅重读有变动的记录。项目文档的文件名搜索调用 `workspaceFiles.search`，按需求查找继续通过 DSH shell 执行 `hw find`。
+
+### Product Subagents 的工作目录
+
+对 `dsh-plugin-product-subagents@0.4.1` 的本地对照测试中，DSH 会话切换 checkout 后，产品进程仍在原会话目录启动。SiliconHQ 在开发步骤的启动预览和实际委派前检查这项限制，包括自定义 provider 命名空间。遇到提示时，在目标 checkout 新建聊天，或选用支持切换目录的后端。版本和行为可用使用手册中的社区后端验收命令复核。

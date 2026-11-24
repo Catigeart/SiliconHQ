@@ -13,8 +13,8 @@ export function Reassignment({ candidates, call, sessionId, id, busy, submit }) 
     if (!open) return;
     let active = true;
     call('reassignmentOptions', { sessionId, id, executionId })
-      .then(({ options }) => {
-        if (active) setResult({ executionId, options });
+      .then(({ options, excluded }) => {
+        if (active) setResult({ executionId, options, excluded });
       })
       .catch((error) => {
         if (active) setResult({ executionId, error: error.message });
@@ -89,6 +89,18 @@ export function Reassignment({ candidates, call, sessionId, id, busy, submit }) 
       ),
     options?.length === 0 &&
       h('p', null, '暂无兼容的命名实例。可在插件设置的「管理 Agent 实例」中添加，再刷新此列表。'),
+    result?.executionId === executionId &&
+      result.excluded?.length > 0 &&
+      h(
+        'details',
+        null,
+        h('summary', null, '查看不可选实例及原因'),
+        h(
+          'ul',
+          null,
+          result.excluded.map((row) => h('li', { key: row.id }, row.name + ' · ' + row.reason)),
+        ),
+      ),
     (error || options) && button('刷新实例列表', reloadOptions),
     h('small', null, '上次委派可能已经修改了文件。新实例将重新执行所选步骤。'),
     h(

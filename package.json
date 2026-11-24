@@ -1,6 +1,6 @@
 {
   "name": "dsh-sihq",
-  "version": "0.14.3",
+  "version": "0.14.4",
   "private": true,
   "type": "module",
   "bin": {
@@ -10,6 +10,7 @@
     "build:core": "tsc && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
     "build:client": "node scripts/build-client.mjs",
     "build": "npm run build:core && npm run build:client",
+    "prepack": "npm run build",
     "check:host": "tsc -p tsconfig.host.json",
     "check:client": "tsc -p tsconfig.client.json && node scripts/build-client.mjs --check",
     "check": "npm run build:core && npm run check:host && npm run check:client",

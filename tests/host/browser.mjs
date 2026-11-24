@@ -32,7 +32,15 @@ function reachableAtCenter(el) {
   return el.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
 }
 
-export async function verify({ context, url, run, baseline, shellProbe }) {
+export async function verify({
+  context,
+  url,
+  run,
+  baseline,
+  shellProbe,
+  expectedShellError,
+  productProbe,
+}) {
   const errors = [];
   context.on('page', (p) => p.on('pageerror', (e) => errors.push(e.message)));
   const page = await context.newPage();
@@ -109,6 +117,27 @@ export async function verify({ context, url, run, baseline, shellProbe }) {
     await page.goto(url);
     const close = page.locator('[aria-label="关闭"]').first();
     if (await close.isVisible()) await close.click();
+    if (productProbe) {
+      await chat('SIHQ 测试项目');
+      const before = await pick('Smoke 社区后端目录');
+      await before.getByText('启动前检查通过', { exact: true }).waitFor();
+      await page.keyboard.press('Escape');
+      await command('/smoke-checkout');
+      await waitForValue(() => existsSync(join(run, 'checkout.log')), 'changed checkout');
+      await command('/smoke-product-cwd');
+      await waitForValue(() => existsSync(join(run, 'product-cwd.json')), 'actual product cwd');
+      const probe = JSON.parse(readFileSync(join(run, 'product-cwd.json'), 'utf8'));
+      assert.equal(resolve(probe.observed), resolve(probe.original));
+      assert.notEqual(resolve(probe.observed), resolve(probe.requested));
+      const after = await pick('Smoke 社区后端目录');
+      await after.getByText(/目标目录新建聊天/).waitFor();
+      assert.ok(await button('开始执行', after).isDisabled());
+      pass(
+        'Installed Product Subagents 0.4.1 used the original cwd; SIHQ rejected dispatch in the switched checkout.',
+        probe,
+      );
+      return;
+    }
     if (shellProbe) {
       await chat('SIHQ 测试项目');
       await command('/smoke-checkout');
@@ -120,11 +149,21 @@ export async function verify({ context, url, run, baseline, shellProbe }) {
       );
       const { call, result } = JSON.parse(readFileSync(join(run, 'native-shell.json'), 'utf8'));
       assert.equal(result.results[0].callId, call.id);
-      pass(
-        'Recorded a direct DSH shell response independently of the SIHQ verification step.',
-        call.name,
-      );
-      if (!result.results[0].result.isError) {
+      const output = result.results[0].result;
+      if (expectedShellError) {
+        assert.equal(output.isError, true, 'Expected a host tool failure');
+        assert.equal(output.error?.info?.code, expectedShellError);
+        pass('Confirmed the expected host error before command execution.', expectedShellError);
+        return;
+      }
+      assert.equal(output.isError, false, output.error?.message);
+      const value = call.name === 'run_code' ? output.value?.result : output.value;
+      assert.equal(value?.kind, 'foreground');
+      assert.equal(value.exitCode, 0);
+      assert.equal(resolve(value.cwd), resolve(join(run, 'project/checkout')));
+      assert.match(value.stdout.text, /SMOKE_NATIVE_TOOL/);
+      pass('Direct DSH shell produced the expected foreground output and exit code.', call.name);
+      {
         await command('/smoke-stop-shell');
         const file = join(run, 'native-stop.json');
         await waitForValue(() => existsSync(file), 'native shell stop evidence');
@@ -301,6 +340,13 @@ export async function verify({ context, url, run, baseline, shellProbe }) {
       assert.match(await git.innerText(), /Git/i);
       await git.getByRole('textbox', { name: '任务', exact: true }).fill('Check Git preflight');
       await waitForValue(() => button('开始执行', git).isDisabled(), 'non-Git preflight');
+      await button('重新检查', git).click();
+      await git.getByText(/已重新检查，任务文字已保留/).waitFor();
+      assert.equal(
+        await git.getByRole('textbox', { name: '任务', exact: true }).inputValue(),
+        'Check Git preflight',
+      );
+      assert.ok(await button('开始执行', git).isDisabled());
       await page.keyboard.press('Escape');
       await git.waitFor({ state: 'hidden' });
       assert.equal(models().length, calls);

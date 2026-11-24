@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { fault } from '../runtime/faults.js';
+import { isAbsolute, join } from 'node:path';
 import { dataDirectory } from './files.js';
 import { readWorkflowProjection, workflowFileStamp } from './workflow-history.js';
 
@@ -68,31 +69,109 @@ function legacyStops(dir: string, id: string): { cwd: string; runId: string; job
     }));
 }
 
-// An external restore can arrive after this database was initialized. Import new
-// evidence under the same transaction that admits writers. Only confirmation
-// from the owning flow removes a stop, even if the source record disappears.
-export function workspaceStops(db: DatabaseSync, locate: (cwd: string) => Workspace): Pending[] {
+function sources() {
+  const root = dataDirectory('workflows');
+  const stamps = new Map<string, string>();
+  for (const entry of existsSync(root) ? readdirSync(root, { withFileTypes: true }) : []) {
+    if (entry.isDirectory() && /^[a-f0-9-]{36}$/i.test(entry.name))
+      stamps.set(entry.name, workflowFileStamp(join(root, entry.name)));
+  }
+  return stamps;
+}
+
+const ownerName = 'workflow-owner.json';
+function journalIdentity(dir: string) {
+  const stat = statSync(join(dir, 'runtime.sqlite'), { bigint: true, throwIfNoEntry: false });
+  return stat && stat.ino !== 0n ? [stat.dev, stat.ino, stat.birthtimeNs].join(':') : undefined;
+}
+
+// Store a small ownership checkpoint in the same transaction as the workflow.
+// The journal's normal export queue publishes it. A copied/replaced database
+// must establish its own binding before a busy read can be attributed to it.
+export function checkpointWorkflowOwner(db: DatabaseSync, dir: string, id: string, cwd: string) {
+  const journal = journalIdentity(dir);
+  if (!journal) return;
+  const changed = db
+    .prepare(
+      'INSERT INTO checkpoints(name,value) VALUES (?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value WHERE checkpoints.value<>excluded.value',
+    )
+    .run(ownerName, JSON.stringify({ id, cwd, journal })).changes;
+  if (changed) db.prepare('INSERT OR IGNORE INTO pending_exports VALUES (?)').run(ownerName);
+}
+
+function exportedOwner(dir: string, id: string): string | undefined {
+  try {
+    const owner = JSON.parse(readFileSync(join(dir, ownerName), 'utf8'));
+    if (
+      owner?.id === id &&
+      owner.journal &&
+      owner.journal === journalIdentity(dir) &&
+      typeof owner.cwd === 'string' &&
+      isAbsolute(owner.cwd)
+    )
+      return owner.cwd;
+  } catch (error) {
+    if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code !== 'ENOENT')
+      throw error;
+  }
+}
+
+// Probe restored journals before taking the shared write transaction. Inside it
+// recheck the inventory, the stamps and the import ledger before publishing.
+export function prepareWorkspaceStops(
+  db: DatabaseSync,
+  locate: (cwd: string) => Workspace,
+  overlaps: (candidate: Workspace) => boolean,
+) {
   db.exec(
     'CREATE TABLE IF NOT EXISTS verification_stops(flowId TEXT, runId TEXT, jobId TEXT, path TEXT, git INTEGER, PRIMARY KEY(flowId,jobId));' +
       'CREATE TABLE IF NOT EXISTS verification_sources(flowId TEXT PRIMARY KEY, stamp TEXT NOT NULL)',
   );
-  const root = dataDirectory('workflows');
-  const add = db.prepare(insert);
+  const inventory = sources();
   const source = db.prepare('SELECT stamp FROM verification_sources WHERE flowId=?');
-  const scanned = db.prepare('INSERT OR REPLACE INTO verification_sources VALUES (?,?)');
-  for (const entry of existsSync(root) ? readdirSync(root, { withFileTypes: true }) : []) {
-    if (!entry.isDirectory() || !/^[a-f0-9-]{36}$/i.test(entry.name)) continue;
-    const dir = join(root, entry.name);
-    const stamp = workflowFileStamp(dir);
-    if (source.get(entry.name)?.stamp === stamp) continue;
-    for (const row of legacyStops(dir, entry.name)) {
-      const cwd = String(row.cwd);
-      const workspace = existsSync(cwd) ? locate(cwd) : { path: cwd, git: false };
-      add.run(entry.name, row.runId, row.jobId, workspace.path, Number(workspace.git));
+  const changes = new Map<string, Pending[]>();
+  for (const [id, stamp] of inventory) {
+    if (source.get(id)?.stamp === stamp) continue;
+    const dir = dataDirectory('workflows', id);
+    try {
+      const rows = legacyStops(dir, id).map(({ cwd, runId, jobId }) => {
+        const ws = existsSync(cwd) ? locate(cwd) : { path: cwd, git: false };
+        return { flowId: id, runId, jobId, path: ws.path, git: Number(ws.git) };
+      });
+      changes.set(id, rows);
+    } catch (error) {
+      if (![5, 6].includes(((error as { errcode?: number }).errcode ?? 0) & 255)) throw error;
+      const owner = exportedOwner(dir, id);
+      if (!owner || overlaps(existsSync(owner) ? locate(owner) : { path: owner, git: false }))
+        throw fault(
+          'resource',
+          'LOCKED',
+          owner
+            ? '本项目的流程数据库正被占用，请稍后重试'
+            : '旧流程或恢复后的数据库正被占用，暂时无法确认所属项目，请稍后重试',
+        );
+      // An unrelated busy journal stays eligible for inspection on the next admission.
     }
-    scanned.run(entry.name, stamp);
   }
-  return db.prepare('SELECT * FROM verification_stops').all() as Pending[];
+  return () => {
+    const live = sources();
+    for (const [id, stamp] of live) {
+      if (inventory.get(id) === stamp) continue;
+      const owner = exportedOwner(dataDirectory('workflows', id), id);
+      if (!owner || overlaps(existsSync(owner) ? locate(owner) : { path: owner, git: false }))
+        throw fault('resource', 'LOCKED', '本项目的流程记录正在更新，请重试');
+      changes.delete(id);
+    }
+    const add = db.prepare(insert);
+    const scanned = db.prepare('INSERT OR REPLACE INTO verification_sources VALUES (?,?)');
+    for (const [id, rows] of changes) {
+      const stamp = inventory.get(id)!;
+      if (source.get(id)?.stamp === stamp) continue;
+      for (const row of rows) add.run(id, row.runId, row.jobId, row.path, row.git);
+      scanned.run(id, stamp);
+    }
+    return db.prepare('SELECT * FROM verification_stops').all() as Pending[];
+  };
 }
 
 // The owning template holds the workspace lease throughout these writes.

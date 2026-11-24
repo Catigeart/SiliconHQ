@@ -70,7 +70,7 @@ export async function preflightWorkflow(ctx, frozen, cwd, options = {}) {
         readOnly,
       ]);
       if (!routeChecks.has(key))
-        routeChecks.set(key, checkedRoute(ctx, service, route, readOnly, parent));
+        routeChecks.set(key, checkedRoute(ctx, service, route, readOnly, parent, { cwd }));
       await whileActive(routeChecks.get(key), signal);
     } catch (error) {
       issue(name, error.message);

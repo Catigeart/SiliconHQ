@@ -1,6 +1,7 @@
 import { currentBatch } from './workflow-control.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { instancePrefix, instancesOf, resolveRoute } from './agent-instances.js';
+import { sameInstanceRoute } from './route-compatibility.js';
 import { checkedRoute } from './agent-routing.js';
 
 import { roleForStage } from './dist/workflow/rules.js';
@@ -57,7 +58,12 @@ function revision(route) {
 
 function instanceRoute(flow, step, instance) {
   const route = resolveRoute({ backend: instancePrefix + instance.id }, [instance]);
-  if (revision(route) === revision(previousRoute(flow, step)))
+  const previous = previousRoute(flow, step);
+  if (
+    route.instanceId === previous.instanceId &&
+    route.baseBackend === previous.baseBackend &&
+    sameInstanceRoute(route, previous)
+  )
     throw new Error('请选择不同的执行实例或使用原实例重试');
   return route;
 }
@@ -75,6 +81,7 @@ export async function reassignmentOptions(ctx, config, flow, executionId) {
           route,
           !['implement', 'repair'].includes(step.stage),
           ctx.get('agents')?.get?.(flow.dsh.session),
+          { cwd: flow.cwd },
         );
         return {
           id: instance.id,
@@ -83,12 +90,15 @@ export async function reassignmentOptions(ctx, config, flow, executionId) {
           reasoningEffort: route.reasoningEffort,
           revision: revision(route),
         };
-      } catch {
-        return undefined;
+      } catch (error) {
+        return { id: instance.id, name: instance.name, reason: error.message };
       }
     }),
   );
-  return { options: options.filter(Boolean) };
+  return {
+    options: options.filter((row) => !('reason' in row)),
+    excluded: options.filter((row) => 'reason' in row),
+  };
 }
 
 export function resolveReassignment(config, flow, request) {

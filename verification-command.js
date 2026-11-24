@@ -107,8 +107,12 @@ async function invoke(ctx, parent, args, signal) {
     signal,
   });
   const entry = batch.results.find((item) => item.callId === id);
-  if (!entry || entry.result.isError !== false)
-    throw new Error(entry?.result.error?.message || 'DSH 未返回可核实的工具结果。');
+  if (!entry || entry.result.isError !== false) {
+    const failure = entry?.result?.error;
+    throw Object.assign(new Error(failure?.message || 'DSH 未返回可核实的工具结果。'), {
+      hostErrorCode: typeof failure?.info?.code === 'string' ? failure.info.code : undefined,
+    });
+  }
   return name === 'run_code' ? entry.result.value?.result : entry.result.value;
 }
 
@@ -284,17 +288,26 @@ export async function executeVerification(
       ? '验证通过'
       : result.sandbox?.denied
         ? '验证被宿主沙箱拒绝'
-        : report.timedOut
-          ? '验证超时'
-          : report.cancelled
-            ? '验证已取消'
-            : launchFailed
-              ? '验证程序未启动或未取得程序退出码，请检查命令和运行环境'
-              : '验证失败（退出码 ' + (report.exitCode ?? '未知') + '）';
+        : result.sandbox?.runnerFailed
+          ? '宿主沙箱执行器失败，无法核实命令结果'
+          : report.timedOut
+            ? '验证超时'
+            : report.cancelled
+              ? '验证已取消'
+              : launchFailed
+                ? '验证程序未启动或未取得程序退出码，请检查命令和运行环境'
+                : '验证失败（退出码 ' + (report.exitCode ?? '未知') + '）';
   } catch (error) {
     report.timedOut ||= timedOut;
     report.cancelled ||= signal.aborted;
-    report.summary = report.timedOut ? '验证超时' : report.cancelled ? '验证已取消' : '验证失败';
+    if (typeof error?.hostErrorCode === 'string') report.hostErrorCode = error.hostErrorCode;
+    report.summary = report.timedOut
+      ? '验证超时'
+      : report.cancelled
+        ? '验证已取消'
+        : report.hostErrorCode === 'SANDBOX_PREPARATION_FAILED'
+          ? '宿主沙箱准备失败，验证命令未启动'
+          : '未能取得可核实的命令结果';
     report.stderr = bounded(error instanceof Error ? error.message : String(error));
   } finally {
     clearTimeout(timer);

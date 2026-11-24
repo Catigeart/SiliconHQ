@@ -85,6 +85,7 @@ export function VerificationEvidence({ report }) {
       report.exitCode == null ? '未取得退出码' : '退出码 · ' + report.exitCode,
       report.durationMs != null && ' · 耗时 ' + report.durationMs / 1000 + ' 秒',
     ),
+    report.hostErrorCode && h('div', null, '宿主错误码 · ', h('code', null, report.hostErrorCode)),
     report.timedOut && h('div', null, '命令已超时。'),
     report.cancelled && h('div', null, '命令已取消。'),
     (report.reason || report.summary) && h('div', null, report.reason || report.summary),

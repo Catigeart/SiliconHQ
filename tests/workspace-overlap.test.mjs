@@ -5,7 +5,7 @@ import * as fc from 'fast-check';
 import { stopVerificationJob } from '../verification-command.js';
 import { spawnSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -349,4 +349,45 @@ test('two legacy owners can reconcile independently before new work is admitted'
     second.release();
   }
   lockWorkspace(parent)();
+});
+
+test('an exclusive workflow journal fences its own checkout without blocking another project', (t) => {
+  const { parent, home, child } = fixture(t);
+  const other = join(home, 'independent');
+  mkdirSync(other);
+  const store = new WorkflowStore();
+  const flow = store.create('locked journal', parent, 0);
+  const db = new DatabaseSync(join(store.directory(flow.id), 'runtime.sqlite'));
+  try {
+    db.exec('PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE');
+    lockWorkspace(other)();
+    assert.throws(
+      () => lockWorkspace(child),
+      (e) => e.failure?.code === 'LOCKED',
+    );
+    db.exec('ROLLBACK');
+    lockWorkspace(child)();
+  } finally {
+    db.close();
+  }
+});
+
+test('a replacement journal cannot use the old export to bypass an unknown workspace fence', (t) => {
+  const { parent, home } = fixture(t);
+  const other = join(home, 'independent');
+  mkdirSync(other);
+  const store = new WorkflowStore();
+  const flow = store.create('original', parent, 0);
+  const file = join(store.directory(flow.id), 'runtime.sqlite');
+  renameSync(file, file + '.original');
+  const db = new DatabaseSync(file);
+  try {
+    db.exec('CREATE TABLE checkpoints(name TEXT PRIMARY KEY,value TEXT); BEGIN EXCLUSIVE');
+    assert.throws(
+      () => lockWorkspace(other),
+      (e) => e.failure?.code === 'LOCKED',
+    );
+  } finally {
+    db.close();
+  }
 });

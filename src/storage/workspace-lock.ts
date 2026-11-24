@@ -1,4 +1,4 @@
-import { workspaceStops, verificationStops } from './workspace-verification.js';
+import { prepareWorkspaceStops, verificationStops } from './workspace-verification.js';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
@@ -109,13 +109,17 @@ export function lockTemplateWorkspace(
     // transaction holds no task data and ends as soon as the exact-key lock is acquired.
     const admission = new DatabaseSync(join(root, 'admission.sqlite'));
     try {
-      admission.exec('PRAGMA busy_timeout=5000; BEGIN IMMEDIATE');
-      const conflicts =
-        mode === 'read'
-          ? []
-          : workspaceStops(admission, workspaceFor).filter((stop) =>
-              overlap(workspace, { path: stop.path, git: !!stop.git }),
-            );
+      admission.exec('PRAGMA busy_timeout=5000');
+      const importStops =
+        mode === 'write'
+          ? prepareWorkspaceStops(admission, workspaceFor, (candidate) =>
+              overlap(workspace, candidate),
+            )
+          : undefined;
+      admission.exec('BEGIN IMMEDIATE');
+      const conflicts = !importStops
+        ? []
+        : importStops().filter((stop) => overlap(workspace, { path: stop.path, git: !!stop.git }));
       const owns = (stop: (typeof conflicts)[number]) =>
         recoveringFlow === stop.flowId && workspace.path === stop.path;
       const other = conflicts.find((stop) => !owns(stop));

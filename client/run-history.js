@@ -45,12 +45,17 @@ export function installRunHistory(ctx, call) {
     if (managedCommands.has(sessionId)) throw new Error('当前会话正在提交指令。');
     managedCommands.add(sessionId);
     try {
-      const response = await ctx.remote.commands.execute(
-        sessionId,
-        '/sihq ' + JSON.stringify(args),
-        [],
-      );
-      if (!response.ok) throw new Error(response.error.message);
+      let response;
+      try {
+        response = await ctx.remote.commands.execute(
+          sessionId,
+          '/sihq ' + JSON.stringify(args),
+          [],
+        );
+        if (!response.ok) throw new Error(response.error.message);
+      } catch (error) {
+        throw Object.assign(new Error(error.message), { deliveryUnknown: true });
+      }
       const result = response.value?.result;
       if (result?.kind !== 'success') throw new Error(result?.text || '提交失败，请检查当前会话。');
       return result;
@@ -111,7 +116,8 @@ export function installRunHistory(ctx, call) {
       button('刷新记录', refresh),
       !result && h('p', { role: 'status' }, '正在读取…'),
       result?.error && h('p', { role: 'alert' }, result.error),
-      result?.items?.length === 0 && h('p', null, '本会话还没有运行记录。'),
+      result?.partial && h('p', { role: 'status' }, '部分历史记录暂时无法读取，可稍后刷新。'),
+      !result?.partial && result?.items?.length === 0 && h('p', null, '本会话还没有运行记录。'),
       result?.items?.map((item) =>
         h(
           'article',
@@ -534,43 +540,57 @@ export function installRunHistory(ctx, call) {
     );
   }
   async function beginNextRound(sessionId, id) {
-    const plan = await call('prepareContinuation', { sessionId, id });
-    openLaunchDialog(sessionId, plan, true);
+    const prepare = (replaces = undefined) =>
+      call('prepareContinuation', { sessionId, id, replaces });
+    openLaunchDialog(sessionId, await prepare(), true, prepare);
   }
-  function openLaunchDialog(sessionId, plan, continuation) {
+  function openLaunchDialog(sessionId, initialPlan, continuation, prepare) {
     const scope = ctx.sessions.scope(sessionId);
     if (!scope) throw new Error('会话已关闭，请返回工作区。');
-    const load = (includeDiff, id) =>
-      id
-        ? call('contextReference', { sessionId, token: plan.token, id })
-        : call('contextSources', { sessionId, token: plan.token, includeDiff, compact: true });
-    const documents = (request, signal) =>
-      call('projectDocuments', { sessionId, token: plan.token, ...request }, signal);
-    taskDialog(
-      scope,
-      plan,
-      load,
-      async (prompt, ids, inheritReports) => {
-        const result = await dispatch(sessionId, [
-          'launch',
-          plan.token,
-          prompt,
-          JSON.stringify(ids),
-          ...(inheritReports ? ['--inherit-reports'] : []),
-        ]);
+    function bind(plan) {
+      const loadSources = (includeDiff, id) =>
+        id
+          ? call('contextReference', { sessionId, token: plan.token, id })
+          : call('contextSources', { sessionId, token: plan.token, includeDiff, compact: true });
+      const documents = (request, signal) =>
+        call('projectDocuments', { sessionId, token: plan.token, ...request }, signal);
+      async function submit(prompt, ids, inheritReports) {
+        let deliveryError, result;
+        try {
+          result = await dispatch(sessionId, [
+            'launch',
+            plan.token,
+            prompt,
+            JSON.stringify(ids),
+            ...(inheritReports ? ['--inherit-reports'] : []),
+          ]);
+        } catch (error) {
+          if (!error.deliveryUnknown) throw error;
+          deliveryError = error;
+        }
         let receipt;
         try {
           receipt = await call('launchReceipt', { sessionId, token: plan.token });
         } catch {
           // An accepted run is also accessible from this session's history.
         }
-        const view = launchView(result, receipt ?? {});
+        if (deliveryError && !receipt?.jobId && !receipt?.flowId) throw deliveryError;
+        const view = launchView(
+          result ?? { kind: 'success', text: '已收到后台任务回执' },
+          receipt ?? {},
+        );
         if (receipt?.jobId && !receipt.flowId && !receipt.error) view.trackingToken = plan.token;
         if (view.flowId) openDetail(sessionId, view.flowId, 0, view.jobId);
         else showReceipt(sessionId, view);
-      },
+      }
+      return { plan, loadSources, submit, documents };
+    }
+    taskDialog(
+      scope,
+      bind(initialPlan),
       continuation,
-      documents,
+      async (previousToken) => bind(await prepare(previousToken)),
+      () => history(sessionId),
     );
   }
   function launchView(result, receipt) {

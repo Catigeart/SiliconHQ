@@ -123,6 +123,36 @@ class LocalAdapter extends LlmAdapter {
 
 export function apply(ctx) {
   ctx.llm.registerAdapter(['sihq-test'], new LocalAdapter());
+  if (process.env.SIHQ_TEST_PRODUCT)
+    ctx.commands.register({
+      name: 'smoke-product-cwd',
+      description: 'Measure the installed product bridge working directory',
+      async handler({ agent, signal }) {
+        const requested = await ctx.workingDirectory.ensure(agent, signal);
+        const provider = ctx.get('subagents').getProvider(process.env.SIHQ_TEST_PRODUCT);
+        const child = await provider.start({
+          parent: agent,
+          cwd: requested,
+          signal,
+          prompt: [{ type: 'text', text: 'print working directory' }],
+        });
+        try {
+          const answer = await child.result;
+          const observed = answer.output.find((x) => x.type === 'text')?.text.trim();
+          writeFileSync(
+            join(process.env.SIHQ_TEST_DIR, 'product-cwd.json'),
+            JSON.stringify({
+              requested,
+              observed,
+              original: agent.session.header.cwd || process.cwd(),
+            }),
+          );
+        } finally {
+          await child.dispose();
+        }
+        return { kind: 'success', text: '已测量产品目录' };
+      },
+    });
   ctx.commands.register({
     name: 'smoke-checkout',
     description: 'Switch this test session to a different checkout',

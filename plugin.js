@@ -4,87 +4,34 @@ import {
   catalogTemplates,
   availableProviders,
   resolveTemplate,
-  launchConfig,
 } from './workflow-catalog.js';
-export { Config, availableProviders, resolveTemplate } from './workflow-catalog.js';
-import { projectDocuments } from './project-documents.js';
-import {
-  attachDiff,
-  chatSources,
-  contextReference,
-  reportSources,
-  selectHandoff,
-} from './workflow-handoff.js';
-import { reassignmentOptions, resolveReassignment } from './workflow-reassignment.js';
+import { selectHandoff } from './workflow-handoff.js';
+import { resolveReassignment } from './workflow-reassignment.js';
 import { checkedRoute } from './agent-routing.js';
 import { observeProviderNames } from './provider-discovery.js';
-import {
-  agentName,
-  describeExecutor,
-  verificationSteps,
-  builtinSequenceSummary,
-  sequenceSummary,
-} from './dist/workflow/rules.js';
 import { preflightWorkflow, assertPreflight } from './workflow-preflight.js';
-import { exportWorkflow, inspectImport, prepareImport } from './workflow-portable.js';
-import { describeRun, runApprovalContext, runProgress, runStep } from './run-results.js';
-import {
-  scopedFlow,
-  scopedFlowForAgent,
-  assertScope,
-  ensureAgentWorkspace,
-  sessionWorkspace,
-} from './dsh-workspace.js';
+import { scopedFlowForAgent, ensureAgentWorkspace } from './dsh-workspace.js';
 import { WorkflowStore } from './dist/storage/workflows.js';
-import { RunStore } from './dist/storage/runs.js';
-import { runProgressQuery } from './dist/storage/workflow-progress.js';
 import { sameProjectDirectory } from './dist/storage/project-path.js';
-import { checkInstance, modelChoices } from './instance-health.js';
-import { listPresetOptions, readonlyPreset } from './preset-options.js';
-import {
-  routeLabel,
-  resolveRoute,
-  inspectInstances,
-  instanceRows,
-  instancesOf,
-  validateInstanceRepair,
-  productEntries,
-  registerProductBridge,
-} from './agent-instances.js';
-import { previewStepInput } from './step-prompt.js';
-import { inspectTrackedDiff } from './workflow-git.js';
+import { routeLabel, productEntries, registerProductBridge } from './agent-instances.js';
 import { installReadonlyGuard } from './readonly.js';
-import { inspectTemplates } from './workflow-templates.js';
 import {
   roles,
-  routeFor,
   registerReadonlyCodex,
-  activationPrompt,
-  hostSchema,
   routing,
-  hasActiveWorkflowJob,
   submitWorkflow,
   resolveStartPlan,
 } from './native.js';
-import { randomUUID } from 'node:crypto';
 import { argumentsOf, commandHelp, executeCompatCommand } from './compat-command.js';
 import { parseCommand } from './dist/commands/parse.js';
 
+import { registerCatalog } from './catalog-api.js';
+import { registerRunQueries, historyPage } from './run-api.js';
+import { registerLaunchPreviews } from './launch-preview-api.js';
+export { Config, availableProviders, resolveTemplate } from './workflow-catalog.js';
+
 export const name = 'dsh-sihq';
 export const inject = ['commands'];
-function historyPage(store, cwd, sessionId, offset = 0, limit = 25) {
-  if (typeof sessionId !== 'string' || !sessionId) throw new Error('请打开目标 DSH 会话后查询。');
-  if (
-    !Number.isSafeInteger(offset) ||
-    offset < 0 ||
-    !Number.isSafeInteger(limit) ||
-    limit < 1 ||
-    limit > 100
-  )
-    throw new Error('历史分页参数无效');
-  return store.listPage(cwd, { session: sessionId, offset, limit });
-}
-
 async function submitInSession(ctx, config, agent, request, flags, controllers) {
   let plan;
   if (request.action === 'start') {
@@ -168,7 +115,8 @@ async function execute(
     function trackDirectLaunch(receipt, ready) {
       if (receipt.flowId) return;
       const now = Date.now();
-      for (const [key, entry] of trials) if (entry.expiry <= now) trials.delete(key);
+      for (const [key, entry] of trials)
+        if (!entry.submitting && entry.expiry <= now) trials.delete(key);
       trials.set(receipt.jobId, { sessionId: agent.id, expiry: now + 60_000, receipt, ready });
     }
     if (args[0] === 'workflow' && args[1] === '--template') {
@@ -190,7 +138,13 @@ async function execute(
     }
     if (['try', 'launch'].includes(args[0]) && [3, 4, 5].includes(args.length)) {
       const trial = trials.get(args[1]);
-      if (!trial || trial.receipt || trial.sessionId !== agent.id || Date.now() > trial.expiry)
+      if (
+        !trial ||
+        trial.superseded ||
+        trial.receipt ||
+        trial.sessionId !== agent.id ||
+        Date.now() > trial.expiry
+      )
         throw new Error('启动预览已过期，请重新从 /sihq 选择流程。');
       if (!sameProjectDirectory(cwd, trial.cwd))
         throw new Error('会话工作目录已改变，请重新预览。');
@@ -276,6 +230,7 @@ async function execute(
       const lines = page.items.map((f) =>
         [f.id, f.status, f.stage, JSON.stringify(f.prompt)].join('  '),
       );
+      if (page.partial) lines.push('部分历史记录暂时无法读取，可稍后刷新。');
       if (page.nextOffset !== null) lines.push('/sihq workflow list --offset ' + page.nextOffset);
       return { kind: 'success', text: lines.join('\n') || '本会话暂无 SiliconHQ 运行记录。' };
     }
@@ -317,7 +272,9 @@ async function execute(
       const old = scopedFlowForAgent(agent, id, new WorkflowStore(), cwd);
       const replacement = resolveReassignment(config, old, request);
       await whileActive(
-        checkedRoute(ctx, ctx.get('subagents'), replacement.route, replacement.readOnly, agent),
+        checkedRoute(ctx, ctx.get('subagents'), replacement.route, replacement.readOnly, agent, {
+          cwd,
+        }),
         signal,
       );
       signal?.throwIfAborted();
@@ -404,323 +361,9 @@ export function apply(ctx, config = {}) {
         },
       });
     }
-    async function portableProviders() {
-      const products = productEntries(ctx);
-      let presets = [];
-      let presetError;
-      try {
-        presets = await listPresetOptions(ctx);
-      } catch (error) {
-        presetError = error.message;
-      }
-      return availableProviders(
-        ctx.get('subagents'),
-        config,
-        knownProviderNames(ctx.get('subagents')),
-        products,
-      ).map((p) => ({
-        ...p,
-        product: products.get(p.name)?.product,
-        ...(p.agentPreset && { presets, ...(presetError && { presetError }) }),
-        ...(p.agentPreset &&
-          !presets.some((preset) => preset.id === readonlyPreset && !preset.broken) && {
-            read: false,
-            readRestriction: presetError || 'DSH 只读预设不可用',
-          }),
-      }));
-    }
-    endpoint('exportWorkflow', ({ id }) => exportWorkflow(config, id));
-    endpoint('inspectImport', async ({ file, instanceChoices }) =>
-      inspectImport(file, await portableProviders(), config, instanceChoices),
-    );
-    endpoint(
-      'prepareImport',
-      async ({ file, choices, syncBudget, clearOverrides, instanceChoices }) =>
-        prepareImport(
-          config,
-          file,
-          choices,
-          await portableProviders(),
-          syncBudget,
-          clearOverrides,
-          instanceChoices,
-        ),
-    );
-
-    endpoint('validateInstanceRepair', ({ rows, index, value }) =>
-      validateInstanceRepair(rows, index, value),
-    );
-    endpoint('validateTemplate', ({ template }) => {
-      const row = inspectTemplates([template], {
-        instanceIds: new Set(instancesOf(config).map((i) => i.id)),
-      })[0];
-      if (row.diagnostic) throw new Error(row.diagnostic);
-      return row.template;
-    });
-    endpoint('validateRoles', (draft) => {
-      routing(launchConfig(config, 'siliconhq', draft), undefined);
-      return true;
-    });
-    /** @param {{inspectInstanceRows?: unknown[]}} [options] */
-    function workflows({ inspectInstanceRows } = {}) {
-      const entries = templateEntries(config);
-      return {
-        templates: catalogTemplates(config, entries),
-        diagnostics: entries.filter((row) => row.diagnostic),
-        ...(inspectInstanceRows && { instanceEntries: inspectInstances(inspectInstanceRows) }),
-      };
-    }
-    endpoint('workflows', workflows);
-    endpoint('providers', portableProviders);
-    endpoint(
-      'catalog',
-      async ({ sessionId = undefined, inspectInstanceRows = undefined } = {}) => ({
-        ...workflows({ inspectInstanceRows: inspectInstanceRows ?? instanceRows(config) }),
-        providers: await portableProviders(),
-        cwd: sessionId ? sessionWorkspace(ctx, sessionId) : undefined,
-      }),
-    );
-    endpoint('previewStep', (payload) => {
-      const service = ctx.get('subagents');
-      const route = resolveRoute(payload.step, instancesOf(config));
-      const spec = routeFor(service, route, payload.step.kind !== 'develop', ctx);
-      const provider = service.getProvider(spec.provider);
-      const structured = !!provider.capabilities.outputSchema;
-      const { prompt, schema } = previewStepInput(payload);
-      return {
-        prompt: activationPrompt(prompt, schema, structured),
-        structured,
-        schema: structured ? hostSchema(schema) : schema,
-      };
-    });
-    endpoint('modelChoices', (payload) => modelChoices(ctx, payload));
-    const activeChecks = new Set();
-    endpoint('instanceCheck', async (payload, signal) => {
-      if (payload?.live !== true) return checkInstance(ctx, config, payload, signal);
-      if (activeChecks.has(payload.id)) throw new Error('该实例正在执行实际委派测试');
-      const controller = new AbortController();
-      activeChecks.add(payload.id);
-      controllers.add(controller);
-      try {
-        return await checkInstance(
-          ctx,
-          config,
-          payload,
-          AbortSignal.any([signal, controller.signal, AbortSignal.timeout(90000)]),
-        );
-      } finally {
-        controllers.delete(controller);
-        activeChecks.delete(payload.id);
-      }
-    });
-    endpoint('runHistory', ({ sessionId, offset, limit }) =>
-      historyPage(new WorkflowStore(), sessionWorkspace(ctx, sessionId), sessionId, offset, limit),
-    );
-    endpoint('runDetail', ({ sessionId, id, round }) => {
-      const store = new WorkflowStore();
-      const flow = scopedFlow(ctx, sessionId, id, store, false);
-      return describeRun(flow, new RunStore(), round, { store, active: hasActiveWorkflowJob(id) });
-    });
-    endpoint('runProgress', (payload, signal) => {
-      signal.throwIfAborted();
-      const query = runProgressQuery.safeParse(payload);
-      if (!query.success) throw new Error('运行进度查询参数无效，请重新打开运行详情。');
-      return runProgress(ctx, query.data, new WorkflowStore(), hasActiveWorkflowJob(query.data.id));
-    });
-    endpoint('runStep', (payload) => runStep(ctx, payload, new WorkflowStore(), new RunStore()));
-    endpoint('reassignmentOptions', ({ sessionId, id, executionId }) =>
-      reassignmentOptions(
-        ctx,
-        config,
-        scopedFlow(ctx, sessionId, id, new WorkflowStore()),
-        executionId,
-      ),
-    );
-    endpoint('runApprovalContext', (payload) =>
-      runApprovalContext(ctx, payload, new WorkflowStore()),
-    );
-    async function publishPreview(trial, plan, flow, signal) {
-      const now = Date.now();
-      for (const [key, entry] of trials) if (entry.expiry <= now) trials.delete(key);
-      const preflight = await preflightWorkflow(ctx, plan, trial.cwd, {
-        signal,
-        onBaseline(baseline) {
-          trial.diff = baseline;
-        },
-      });
-      const diffRequired = !!plan.template?.includeDiff;
-      const routes = plan.template?.steps ?? Object.values(plan.roles);
-      const inheritsParentHistory = routes.some(
-        (route) => ctx.get('subagents')?.getProvider(route.backend)?.inheritsParentContext === true,
-      );
-      const token = randomUUID();
-      trials.set(
-        token,
-        Object.assign(trial, { diffRequired, preflight, expiry: now + 30 * 60_000 }),
-      );
-      return {
-        token,
-        flow: {
-          ...flow,
-          preflight,
-          inheritsParentHistory,
-          verificationSteps: verificationSteps(plan.template?.steps ?? []),
-        },
-        cwd: trial.cwd,
-        diffRequired,
-      };
-    }
-    async function prepareLaunch({ sessionId, selected, draft }, signal) {
-      const cwd = await ensureAgentWorkspace(ctx, ctx.get('agents')?.get(sessionId), signal);
-      const frozen = launchConfig(config, selected, draft);
-      const flow = catalogTemplates(frozen).find((item) => item.id === selected);
-      return publishPreview(
-        { sessionId, cwd, selected, config: frozen },
-        resolveStartPlan(frozen, sessionId, selected),
-        flow,
-        signal,
-      );
-    }
-    endpoint('prepareContinuation', async ({ sessionId, id }, signal) => {
-      const agent = ctx.get('agents')?.get(sessionId);
-      const cwd = await ensureAgentWorkspace(ctx, agent, signal);
-      const store = new WorkflowStore();
-      const saved = scopedFlowForAgent(agent, id, store, cwd);
-      if (
-        !saved.dsh ||
-        !describeRun(saved, undefined, undefined, { store, active: hasActiveWorkflowJob(id) })
-          .canContinue
-      )
-        throw new Error('当前运行无法开始下一轮');
-      const { template, roles } = saved.dsh;
-      const describeRoute = (route) =>
-        [
-          route.instanceName || agentName(route.baseBackend || route.backend),
-          route.model,
-          route.reasoningEffort,
-          route.agentPreset,
-        ]
-          .filter(Boolean)
-          .join(' · ');
-      const flow = {
-        name: template?.name ?? 'SiliconHQ 开发流程',
-        summary: template
-          ? sequenceSummary(
-              template.steps,
-              (step) => step.name + ' · ' + describeExecutor(step, describeRoute),
-            )
-          : builtinSequenceSummary(
-              (role) => describeRoute(roles[role] || roles.developer),
-              saved.maxRepairs,
-            ),
-        canInheritReports: !template,
-        rules: '沿用原流程的步骤和执行者。可勾选要交给下一轮的上轮报告。',
-      };
-      return publishPreview(
-        { sessionId, cwd, config, flowId: id, round: saved.round ?? 1 },
-        saved.dsh,
-        flow,
-        signal,
-      );
-    });
-    async function contextTrial(sessionId, token) {
-      const trial = trials.get(token);
-      if (
-        !trial ||
-        trial.sessionId !== sessionId ||
-        trial.receipt ||
-        trial.submitting ||
-        Date.now() >= trial.expiry
-      )
-        throw new Error('上下文预览已过期，请重新选择流程');
-      const agent = ctx.get('agents')?.get(sessionId);
-      const cwd = await ensureAgentWorkspace(ctx, agent);
-      if (!sameProjectDirectory(cwd, trial.cwd)) throw new Error('会话工作目录已改变，请重新预览');
-      return { trial, agent, cwd };
-    }
-    endpoint('projectDocuments', async ({ sessionId, token, ...request }, signal) => {
-      const { trial, agent } = await contextTrial(sessionId, token);
-      return projectDocuments(ctx, agent, trial, request, signal);
-    });
-    endpoint('contextReference', async ({ sessionId, token, id }) => {
-      const { trial } = await contextTrial(sessionId, token);
-      return contextReference(trial, id);
-    });
-    endpoint('contextSources', async ({ sessionId, token, includeDiff, compact }) => {
-      const { trial, agent, cwd } = await contextTrial(sessionId, token);
-      if (!trial.candidates) {
-        const store = new WorkflowStore();
-        const id =
-          trial.flowId ?? store.listPage(cwd, { session: sessionId, limit: 1 }).items[0]?.id;
-        let reports = [];
-        if (id) {
-          const { flow } = store.readProgress(id, 0);
-          assertScope(flow, sessionId, cwd);
-          const round = flow.round ?? 1;
-          if (trial.flowId && round !== trial.round) throw new Error('轮次已更新，请重新预览');
-          if (flow.dsh?.session === sessionId)
-            reports = reportSources(describeRun(flow, undefined), async (expected, index) => {
-              const step = await runStep(
-                ctx,
-                { sessionId, id, round, index },
-                store,
-                new RunStore(),
-                false,
-              );
-              if (
-                !step.report ||
-                step.runId !== expected.runId ||
-                step.executionId !== expected.executionId
-              )
-                throw new Error(step.reportError || '报告已变更，请重新预览');
-              return JSON.stringify(step.report, null, 2);
-            });
-        }
-        trial.candidates = [...chatSources(agent.session), ...reports];
-        trial.sources = [];
-      }
-      if (includeDiff === true || trial.diffRequired) await attachDiff(trial, inspectTrackedDiff);
-      const refs = [...trial.candidates, ...(trial.diff ? [trial.diff] : [])];
-      return {
-        items:
-          compact === true
-            ? refs.map(({ kind, id, label }) => ({ kind, id, label }))
-            : await Promise.all(refs.map((ref) => contextReference(trial, ref.id))),
-        diffRequired: trial.diffRequired,
-        diffError: trial.diffError,
-      };
-    });
-    endpoint('commandReceipt', ({ sessionId, seq }) => {
-      if (!Number.isSafeInteger(seq) || seq < 0) throw new Error('无效的指令回执');
-      const event = ctx.get('agents')?.get(sessionId)?.session?.eventAt(seq);
-      if (event?.type !== 'sihq/launch') throw new Error('本会话没有该启动回执');
-      return event.data;
-    });
-    endpoint('launchReceipt', async ({ sessionId, token }) => {
-      const entry = trials.get(token);
-      if (!entry?.receipt || entry.sessionId !== sessionId || Date.now() > entry.expiry)
-        throw new Error('请从本会话的运行记录查看已提交的任务。');
-      if (!entry.receipt.flowId && !entry.receipt.error) {
-        // A host may schedule its producer after acknowledging the command.
-        let timer;
-        try {
-          await Promise.race([
-            entry.ready,
-            new Promise((resolve) => {
-              timer = setTimeout(resolve, 1500);
-            }),
-          ]);
-        } finally {
-          clearTimeout(timer);
-        }
-      }
-      return entry.receipt;
-    });
-    endpoint('prepareLaunch', prepareLaunch);
-    endpoint(
-      'prepareTrial',
-      async (payload, signal) => (await prepareLaunch(payload, signal)).token,
-    );
+    registerCatalog(ctx, config, endpoint, knownProviderNames, controllers);
+    registerRunQueries(ctx, config, endpoint);
+    registerLaunchPreviews(ctx, config, endpoint, trials);
   });
   ctx.on?.('dispose', () => {
     trials.clear();

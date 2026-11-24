@@ -653,6 +653,7 @@ function VerificationEvidence({ report }) {
       report.exitCode == null ? "未取得退出码" : "退出码 · " + report.exitCode,
       report.durationMs != null && " · 耗时 " + report.durationMs / 1e3 + " 秒"
     ),
+    report.hostErrorCode && h("div", null, "宿主错误码 · ", h("code", null, report.hostErrorCode)),
     report.timedOut && h("div", null, "命令已超时。"),
     report.cancelled && h("div", null, "命令已取消。"),
     (report.reason || report.summary) && h("div", null, report.reason || report.summary),
@@ -1469,10 +1470,39 @@ function Preflight({ report }) {
     )
   );
 }
-function LaunchDialog({ plan, loadSources, submit, continuation, close, documents }) {
+function RefreshableDialog({ initial, prepare, ...props }) {
+  const [current, setCurrent] = import_react7.default.useState(initial);
+  const [task, setTask] = import_react7.default.useState("");
+  async function refresh() {
+    setCurrent(await prepare(current.plan.token));
+  }
+  return h(LaunchDialog, {
+    key: current.plan.token,
+    ...props,
+    ...current,
+    task,
+    setTask,
+    refresh,
+    refreshed: current !== initial
+  });
+}
+function LaunchDialog({
+  plan,
+  loadSources,
+  submit,
+  continuation,
+  close,
+  documents,
+  refresh,
+  refreshed,
+  task,
+  setTask,
+  openHistory
+}) {
   const { flow, cwd } = plan;
   const [inheritReports, setInheritReports] = import_react7.default.useState(false);
-  const [task, setTask] = import_react7.default.useState("");
+  const [uncertain, setUncertain] = import_react7.default.useState(false);
+  const [refreshing, setRefreshing] = import_react7.default.useState(false);
   const [submitting, setSubmitting] = import_react7.default.useState(false);
   const [error, setError] = import_react7.default.useState("");
   const [copyNotice, setCopyNotice] = import_react7.default.useState("");
@@ -1481,7 +1511,9 @@ function LaunchDialog({ plan, loadSources, submit, continuation, close, document
   const statusId = import_react7.default.useId();
   const context = useLaunchContext(loadSources, plan.diffRequired, submitting, documents);
   let blocked = context.blocked;
-  if (!cwd) blocked = "请先为当前聊天关联本地项目。";
+  if (uncertain) blocked = "提交结果尚未确认，请查看本会话运行记录。";
+  else if (refreshing) blocked = "正在重新检查…";
+  else if (!cwd) blocked = "请先为当前聊天关联本地项目。";
   else if (flow.preflight?.ok === false) blocked = "请先解决启动前检查中的问题。";
   else if (!blocked && !task.trim())
     blocked = continuation ? "请输入本轮追加需求。" : "请输入任务描述。";
@@ -1497,7 +1529,10 @@ function LaunchDialog({ plan, loadSources, submit, continuation, close, document
     } catch (failure) {
       inFlight.current = false;
       setSubmitting(false);
-      setError(failure.message);
+      setUncertain(!!failure.deliveryUnknown);
+      setError(
+        failure.deliveryUnknown ? "提交结果尚未确认，请查看本会话运行记录。" : failure.message
+      );
     }
   }
   const footer = h(
@@ -1507,6 +1542,36 @@ function LaunchDialog({ plan, loadSources, submit, continuation, close, document
     h(
       "div",
       { className: "sihq-launch-actions" },
+      uncertain ? h(
+        import_dsh_client_ui_primitives4.Button,
+        {
+          variant: "ghost",
+          onClick: () => {
+            close();
+            openHistory();
+          }
+        },
+        "查看运行记录"
+      ) : h(
+        import_dsh_client_ui_primitives4.Button,
+        {
+          variant: "ghost",
+          disabled: submitting || refreshing,
+          onClick: async () => {
+            if (inFlight.current) return;
+            inFlight.current = true;
+            setRefreshing(true);
+            try {
+              await refresh();
+            } catch (error2) {
+              setError(error2.message);
+              setRefreshing(false);
+              inFlight.current = false;
+            }
+          }
+        },
+        "重新检查"
+      ),
       h(import_dsh_client_ui_primitives4.Button, { variant: "ghost", onClick: close }, submitting ? "关闭" : "取消"),
       h(
         import_dsh_client_ui_primitives4.Button,
@@ -1581,6 +1646,7 @@ function LaunchDialog({ plan, loadSources, submit, continuation, close, document
           )
         )
       ),
+      refreshed && h("small", { role: "status" }, "已重新检查，任务文字已保留。请重新核对本轮引用。"),
       h(Preflight, { report: flow.preflight }),
       flow.inheritsParentHistory && h("small", null, "本流程的 fork Agent 还会继承父会话已完成轮次的历史。"),
       context.panel
@@ -1589,7 +1655,8 @@ function LaunchDialog({ plan, loadSources, submit, continuation, close, document
 }
 function createTaskDialog() {
   let active;
-  return (scope, plan, loadSources, submit, continuation, documents) => {
+  return (scope, initial, continuation, prepare, openHistory) => {
+    const { plan } = initial;
     if (active?.token === plan.token && active.scope === scope) return;
     active?.close();
     const close = () => {
@@ -1597,7 +1664,7 @@ function createTaskDialog() {
     };
     const dispose = scope.effect(() => {
       const root = (0, import_client.createRoot)(document.createElement("div"));
-      root.render(h(LaunchDialog, { plan, loadSources, submit, continuation, close, documents }));
+      root.render(h(RefreshableDialog, { initial, prepare, continuation, close, openHistory }));
       return () => {
         if (active?.close === close) active = void 0;
         root.unmount();
@@ -1912,8 +1979,8 @@ function Reassignment({ candidates, call, sessionId, id, busy, submit }) {
   import_react11.default.useEffect(() => {
     if (!open) return;
     let active = true;
-    call("reassignmentOptions", { sessionId, id, executionId }).then(({ options: options2 }) => {
-      if (active) setResult({ executionId, options: options2 });
+    call("reassignmentOptions", { sessionId, id, executionId }).then(({ options: options2, excluded }) => {
+      if (active) setResult({ executionId, options: options2, excluded });
     }).catch((error2) => {
       if (active) setResult({ executionId, error: error2.message });
     });
@@ -1983,6 +2050,16 @@ function Reassignment({ candidates, call, sessionId, id, busy, submit }) {
       )
     ),
     options?.length === 0 && h("p", null, "暂无兼容的命名实例。可在插件设置的「管理 Agent 实例」中添加，再刷新此列表。"),
+    result?.executionId === executionId && result.excluded?.length > 0 && h(
+      "details",
+      null,
+      h("summary", null, "查看不可选实例及原因"),
+      h(
+        "ul",
+        null,
+        result.excluded.map((row) => h("li", { key: row.id }, row.name + " · " + row.reason))
+      )
+    ),
     (error || options) && button("刷新实例列表", reloadOptions),
     h("small", null, "上次委派可能已经修改了文件。新实例将重新执行所选步骤。"),
     h(
@@ -2050,12 +2127,17 @@ function installRunHistory(ctx, call) {
     if (managedCommands.has(sessionId)) throw new Error("当前会话正在提交指令。");
     managedCommands.add(sessionId);
     try {
-      const response = await ctx.remote.commands.execute(
-        sessionId,
-        "/sihq " + JSON.stringify(args),
-        []
-      );
-      if (!response.ok) throw new Error(response.error.message);
+      let response;
+      try {
+        response = await ctx.remote.commands.execute(
+          sessionId,
+          "/sihq " + JSON.stringify(args),
+          []
+        );
+        if (!response.ok) throw new Error(response.error.message);
+      } catch (error) {
+        throw Object.assign(new Error(error.message), { deliveryUnknown: true });
+      }
       const result = response.value?.result;
       if (result?.kind !== "success") throw new Error(result?.text || "提交失败，请检查当前会话。");
       return result;
@@ -2113,7 +2195,8 @@ function installRunHistory(ctx, call) {
       button("刷新记录", refresh),
       !result && h("p", { role: "status" }, "正在读取…"),
       result?.error && h("p", { role: "alert" }, result.error),
-      result?.items?.length === 0 && h("p", null, "本会话还没有运行记录。"),
+      result?.partial && h("p", { role: "status" }, "部分历史记录暂时无法读取，可稍后刷新。"),
+      !result?.partial && result?.items?.length === 0 && h("p", null, "本会话还没有运行记录。"),
       result?.items?.map(
         (item) => h(
           "article",
@@ -2477,38 +2560,51 @@ function installRunHistory(ctx, call) {
     );
   }
   async function beginNextRound(sessionId, id) {
-    const plan = await call("prepareContinuation", { sessionId, id });
-    openLaunchDialog(sessionId, plan, true);
+    const prepare = (replaces = void 0) => call("prepareContinuation", { sessionId, id, replaces });
+    openLaunchDialog(sessionId, await prepare(), true, prepare);
   }
-  function openLaunchDialog(sessionId, plan, continuation) {
+  function openLaunchDialog(sessionId, initialPlan, continuation, prepare) {
     const scope = ctx.sessions.scope(sessionId);
     if (!scope) throw new Error("会话已关闭，请返回工作区。");
-    const load = (includeDiff, id) => id ? call("contextReference", { sessionId, token: plan.token, id }) : call("contextSources", { sessionId, token: plan.token, includeDiff, compact: true });
-    const documents = (request, signal) => call("projectDocuments", { sessionId, token: plan.token, ...request }, signal);
-    taskDialog(
-      scope,
-      plan,
-      load,
-      async (prompt, ids, inheritReports) => {
-        const result = await dispatch(sessionId, [
-          "launch",
-          plan.token,
-          prompt,
-          JSON.stringify(ids),
-          ...inheritReports ? ["--inherit-reports"] : []
-        ]);
+    function bind(plan) {
+      const loadSources = (includeDiff, id) => id ? call("contextReference", { sessionId, token: plan.token, id }) : call("contextSources", { sessionId, token: plan.token, includeDiff, compact: true });
+      const documents = (request, signal) => call("projectDocuments", { sessionId, token: plan.token, ...request }, signal);
+      async function submit(prompt, ids, inheritReports) {
+        let deliveryError, result;
+        try {
+          result = await dispatch(sessionId, [
+            "launch",
+            plan.token,
+            prompt,
+            JSON.stringify(ids),
+            ...inheritReports ? ["--inherit-reports"] : []
+          ]);
+        } catch (error) {
+          if (!error.deliveryUnknown) throw error;
+          deliveryError = error;
+        }
         let receipt;
         try {
           receipt = await call("launchReceipt", { sessionId, token: plan.token });
         } catch {
         }
-        const view = launchView(result, receipt ?? {});
+        if (deliveryError && !receipt?.jobId && !receipt?.flowId) throw deliveryError;
+        const view = launchView(
+          result ?? { kind: "success", text: "已收到后台任务回执" },
+          receipt ?? {}
+        );
         if (receipt?.jobId && !receipt.flowId && !receipt.error) view.trackingToken = plan.token;
         if (view.flowId) openDetail(sessionId, view.flowId, 0, view.jobId);
         else showReceipt(sessionId, view);
-      },
+      }
+      return { plan, loadSources, submit, documents };
+    }
+    taskDialog(
+      scope,
+      bind(initialPlan),
       continuation,
-      documents
+      async (previousToken) => bind(await prepare(previousToken)),
+      () => history(sessionId)
     );
   }
   function launchView(result, receipt) {
@@ -2611,6 +2707,17 @@ function supportsRoute(base, route, read, named = true) {
   if (route.provider && (base.product || base.name === "sihq-codex-readonly")) return false;
   return !(route.provider || route.model || route.reasoningEffort) || !!base.modelOverride || named && !!base.product;
 }
+var instanceSettingKeys = [
+  "backend",
+  "provider",
+  "model",
+  "reasoningEffort",
+  "product",
+  "agentPreset"
+];
+function sameInstanceRoute(a, b) {
+  return !!a && !!b && instanceSettingKeys.every((key) => (a[key] || "") === (b[key] || ""));
+}
 
 // client/drafts.js
 var record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -2622,8 +2729,6 @@ function sameDraftValue(a, b) {
   const keys = Object.keys(a).filter((key) => a[key] !== void 0);
   return keys.length === Object.keys(b).filter((key) => b[key] !== void 0).length && keys.every((key) => sameDraftValue(a[key], b[key]));
 }
-var routeKeys = ["backend", "provider", "model", "reasoningEffort", "product", "agentPreset"];
-var sameInstanceRoute = (a, b) => !!a && routeKeys.every((key) => a[key] === b[key]);
 var projection = (obj, keys) => Object.fromEntries(keys.filter((key) => obj[key] !== void 0).map((key) => [key, obj[key]]));
 function mergeDraft(base, mine, current, choice = "mine") {
   const conflicts = [];
@@ -2664,7 +2769,7 @@ function mergeDraft(base, mine, current, choice = "mine") {
     const keys = /* @__PURE__ */ new Set([...Object.keys(before), ...Object.keys(local), ...Object.keys(remote)]);
     const result = [];
     const groups = [];
-    if (keys.has("backend")) groups.push(["执行者设置", routeKeys]);
+    if (keys.has("backend")) groups.push(["执行者设置", instanceSettingKeys]);
     for (const role of builtinRoles)
       if (keys.has(role))
         groups.push([role, ["", "Llm", "Model", "ReasoningEffort"].map((s) => role + s)]);
@@ -4473,13 +4578,17 @@ function apply(ctx) {
         }
         const draft = option.id === draftOption ? trial : null;
         if (option.id === draftOption && !draft) throw new Error("草稿已失效，请重新试用。");
-        const plan = await call("prepareLaunch", {
+        const request = {
           sessionId,
           selected: draft?.id ?? option.id.slice(savedOptionPrefix.length),
           ...draft && { draft: draft.draft }
-        });
-        if (!draft) plan.command = exampleCommand(plan.flow);
-        openLaunchDialog(sessionId, plan, false);
+        };
+        const prepare = async (replaces = void 0) => {
+          const plan = await call("prepareLaunch", { ...request, replaces });
+          if (!draft) plan.command = exampleCommand(plan.flow);
+          return plan;
+        };
+        openLaunchDialog(sessionId, await prepare(), false, prepare);
       }
     }
   });

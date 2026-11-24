@@ -1,3 +1,4 @@
+import { archiveCurrentRound } from './dist/storage/workflows.js';
 import { assertWorkflowCommand } from './workflow-control.js';
 import { whileActive } from './cancellation.js';
 import { reassignAttempt, retryAttempts, stepWithOverride } from './workflow-reassignment.js';
@@ -448,7 +449,7 @@ export async function runTemplate({
         ? flows.create(request.prompt, cwd, globalBudget, frozen)
         : undefined;
     releaseFlow = flows.lock(flow?.id ?? request.id);
-    flow ??= request.action === 'continue' ? flows.read(request.id) : flows.readCurrent(request.id);
+    flow ??= flows.readCurrent(request.id);
     if (
       request.action === 'resume' &&
       request.expectedState === undefined &&
@@ -559,9 +560,8 @@ export async function runTemplate({
       );
     }
     if (request.action === 'continue') {
-      const { rounds = [], ...snapshot } = flow;
       Object.assign(flow, {
-        rounds: [...rounds, snapshot],
+        ...archiveCurrentRound(flow),
         dsh: frozen,
         round: (flow.round ?? 1) + 1,
         graph: fresh(),

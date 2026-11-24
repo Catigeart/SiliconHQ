@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { Speed } from '../config/speed.js';
 import { dataDirectory, lockFile, recordDirectory } from './files.js';
 import { type Run } from './runs.js';
+import { checkpointWorkflowOwner } from './workspace-verification.js';
 import { Journal } from '../runtime/journal.js';
 import {
   indexWorkflowSummary,
@@ -137,6 +138,13 @@ export type Workflow = {
   failureReason?: 'repair_budget_exhausted';
   error?: string;
 };
+// Already archived rounds remain in the journal. Legacy inline rounds stay inline
+// until the next DSH checkpoint migrates them through the existing archive writer.
+export function archiveCurrentRound(flow: Workflow) {
+  const { rounds = [], archivedRounds, ...snapshot } = flow;
+  return { ...(archivedRounds && { archivedRounds }), rounds: [...rounds, snapshot] };
+}
+
 export class WorkflowStore {
   constructor(readonly root = dataDirectory('workflows')) {}
   directory(id: string): string {
@@ -176,6 +184,7 @@ export class WorkflowStore {
     const checkpoint = archivedRounds ? { ...current, archivedRounds } : flow;
     const journal = new Journal(dir);
     journal.checkpoint('workflow.json', checkpoint, undefined, (db) => {
+      checkpointWorkflowOwner(db, dir, flow.id, flow.cwd);
       indexWorkflowSummary(db);
       const indexed = db.prepare('PRAGMA user_version').get()?.user_version === 2;
       if (prior && !indexed) {

@@ -46,7 +46,7 @@ export async function projectDocuments(ctx, agent, trial, request, signal) {
       signal,
     );
     if (!result.passed)
-      throw new Error('按需求查找失败，请检查 hw 是否已安装。' + (result.stderr || result.summary));
+      throw new Error(['按需求查找失败', result.summary, result.stderr].filter(Boolean).join('\n'));
     if (result.stdoutTruncated) throw new Error('匹配结果过多，请缩小关键词范围');
     const found = JSON.parse(result.stdout);
     if (typeof found.root !== 'string' || !Array.isArray(found.files))

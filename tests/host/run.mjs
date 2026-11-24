@@ -1,5 +1,13 @@
-import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
+import { createHash } from 'node:crypto';
+import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -19,8 +27,16 @@ const opts = parseArgs({
     baseline: { type: 'boolean' },
     'permission-mode': { type: 'string' },
     'shell-probe': { type: 'boolean' },
+    'expect-shell-error': { type: 'string' },
+    source: { type: 'boolean' },
+    'product-package': { type: 'string' },
   },
 }).values;
+if (opts['product-package'] && (opts.baseline || opts['shell-probe']))
+  throw new Error('Run the product contract in its own profile');
+if (opts.source && opts.package) throw new Error('Choose --source or --package');
+if (opts['expect-shell-error'] && !opts['shell-probe'])
+  throw new Error('--expect-shell-error requires --shell-probe');
 const permissionMode = opts['permission-mode'] ?? 'workspace-write';
 if (!['read-only', 'workspace-write', 'danger-full-access'].includes(permissionMode))
   throw new Error('Choose a DSH permission preset for the isolated test process.');
@@ -95,7 +111,45 @@ writeFileSync(
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
   }),
 );
-const source = realpathSync(resolve(opts.package ?? project)).replaceAll('\\', '/');
+function pack() {
+  const npm =
+    process.platform === 'win32'
+      ? join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')
+      : undefined;
+  const args = [
+    'pack',
+    '--silent',
+    '--json',
+    '--pack-destination',
+    run,
+    '--cache',
+    join(run, 'npm-cache'),
+  ];
+  const output = execFileSync(npm ? process.execPath : 'npm', npm ? [npm, ...args] : args, {
+    cwd: project,
+    encoding: 'utf8',
+  });
+  return join(run, JSON.parse(output)[0].filename);
+}
+const source = realpathSync(resolve(opts.package ?? (opts.source ? project : pack()))).replaceAll(
+  '\\',
+  '/',
+);
+const hostVersion = execFileSync(executable, [...prefix, '--version'], {
+  env,
+  cwd: run,
+  encoding: 'utf8',
+  windowsHide: true,
+}).trim();
+const release = {
+  hostVersion,
+  permissionMode,
+  source,
+  ...(source.endsWith('.tgz') && {
+    sha256: createHash('sha256').update(readFileSync(source)).digest('hex'),
+  }),
+};
+writeFileSync(join(run, 'release.json'), JSON.stringify(release, null, 2));
 function start(args, name) {
   const child = spawn(executable, [...prefix, ...args], {
     env,
@@ -114,7 +168,44 @@ function start(args, name) {
 const installer = start(['plugin', '--profile', 'test', 'add', 'file:' + source], 'install');
 if ((await once(installer, 'close'))[0] !== 0)
   throw Error('DSH plugin installation failed; see install.log');
-writeFileSync(join(profile, 'cordis.patch.yml'), JSON.stringify(profilePatch(!opts.baseline)));
+const patch = profilePatch(!opts.baseline);
+if (opts['product-package']) {
+  const archive = realpathSync(resolve(opts['product-package'])).replaceAll('\\', '/');
+  const product = start(
+    ['plugin', '--profile', 'test', 'add', 'file:' + archive],
+    'product-install',
+  );
+  if ((await once(product, 'close'))[0] !== 0) throw Error('See product-install.log');
+  const name = 'sihq-cwd-test';
+  patch.push({
+    id: 'product-subagents',
+    config: {
+      providerNamespace: 'checkout-test',
+      providers: { [name]: { type: 'codex', command: process.execPath } },
+    },
+  });
+  patch
+    .find((entry) => entry.id === 'siliconhq-command')
+    .config.templates.push({
+      id: 'product-cwd',
+      name: 'Smoke 社区后端目录',
+      steps: [
+        {
+          id: 'write',
+          name: '写入',
+          kind: 'develop',
+          backend: 'checkout-test:' + name,
+          instructions: '检查目录',
+          inputs: [],
+        },
+      ],
+    });
+  // node exec --json ... runs this entirely local Codex stand-in in the actual product cwd.
+  for (const path of [run, join(run, 'project'), join(run, 'project/checkout')])
+    writeFileSync(join(path, 'exec'), 'console.log(process.cwd());');
+  env.SIHQ_TEST_PRODUCT = 'checkout-test:' + name;
+}
+writeFileSync(join(profile, 'cordis.patch.yml'), JSON.stringify(patch));
 const overlayPath = join(run, 'fixture.yml');
 writeFileSync(
   overlayPath,
@@ -174,8 +265,24 @@ try {
     env: { ...process.env, TEMP: temp, TMP: temp, TMPDIR: temp },
   });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1200 } });
-  await verify({ context, url, run, baseline: !!opts.baseline, shellProbe: !!opts['shell-probe'] });
-  console.log('Host smoke checks passed.');
+  await verify({
+    context,
+    url,
+    run,
+    baseline: !!opts.baseline,
+    shellProbe: !!opts['shell-probe'],
+    expectedShellError: opts['expect-shell-error'],
+    productProbe: !!opts['product-package'],
+  });
+  console.log(
+    opts['expect-shell-error']
+      ? 'Expected host error reproduced.'
+      : opts['product-package']
+        ? 'Product checkout contract passed.'
+        : opts['shell-probe']
+          ? 'Host shell probe passed.'
+          : 'Host smoke checks passed.',
+  );
 } finally {
   try {
     await browser?.close();

@@ -1,3 +1,7 @@
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { sameProjectDirectory } from './dist/storage/project-path.js';
+
 export const externalBridge = 'sihq-product-instance';
 
 const products = new Map([
@@ -25,6 +29,34 @@ export function productEntries(ctx) {
     }
   }
   return entries;
+}
+
+// Product Subagents 0.4.1 starts its product in the original session directory.
+// Resolve from the active loader entry, including profiles with custom provider names.
+export function checkProductWorkspace(ctx, provider, parent, cwd) {
+  if (!parent || !cwd || sameProjectDirectory(parent.session?.header?.cwd || process.cwd(), cwd))
+    return;
+  if (!provider?.prepareContinuable || productEntries(ctx).has(provider.name)) return;
+  const pkg = 'dsh-plugin-product-subagents';
+  for (const entry of ctx.get('loader')?.entries?.() ?? []) {
+    if (entry.options?.name !== pkg || entry.fiber?.state !== 2) continue;
+    const cfg = entry.fiber.resolveConfig(entry.options.config ?? {});
+    const ns = cfg?.providerNamespace ?? 'product-subagents';
+    const keys = ['codex', 'claude-code', 'acp', ...Object.keys(cfg?.providers ?? {})];
+    if (!keys.some((key) => provider.name === (ns ? ns + ':' + key : key))) continue;
+    let version;
+    try {
+      const resolve = createRequire(entry.parent.tree.context.baseUrl).resolve;
+      version = JSON.parse(readFileSync(resolve(pkg + '/package.json'), 'utf8')).version;
+    } catch {
+      /* A custom loader can omit the package location. */
+    }
+    if (version && version !== '0.4.1') continue;
+    throw new Error(
+      provider.name +
+        ' 无法确认会在切换后的工作目录执行。请在目标目录新建聊天，或改用支持切换目录的 DSH 后端。',
+    );
+  }
 }
 
 export function developmentRestriction(entry) {

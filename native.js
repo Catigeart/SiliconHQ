@@ -16,7 +16,6 @@ import { runTemplate } from './template-runner.js';
 import { baselineSource, trackedDiff } from './workflow-git.js';
 import { checkGateReturn } from './approval-return.js';
 import { diffReview, selectedWorkflowTemplate } from './workflow-templates.js';
-import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { executeTask } from './dist/execution/tasks.js';
@@ -148,10 +147,10 @@ async function activate({
     onWaiting,
     request: { cwd, parent, label, signal: active, delivery: 'caller' },
     prepare: async (request) => {
-      const { spec } = await checkedRoute(ctx, service, route, readOnly, parent);
+      const { spec } = await checkedRoute(ctx, service, route, readOnly, parent, { cwd });
       request.signal.throwIfAborted();
       // Profile settings may change while the host resolves a preset/model.
-      if (!isDeepStrictEqual(spec, routeFor(service, route, readOnly, ctx, parent)))
+      if (!isDeepStrictEqual(spec, routeFor(service, route, readOnly, ctx, parent, cwd)))
         throw new Error('等待校验时后端配置已变化，请刷新后恢复。');
       const structured = !!service.getProvider(spec.provider).capabilities.outputSchema;
       if (input && structured !== input.structured)

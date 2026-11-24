@@ -1,3 +1,4 @@
+import { sameInstanceRoute } from './route-compatibility.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -235,13 +236,8 @@ function availableName(title, rows) {
     if (!names.has(name)) return name;
   }
 }
-function sameSettings(a, b) {
-  return ['backend', 'model', 'provider', 'reasoningEffort', 'agentPreset', 'product'].every(
-    (k) => (a[k] || '') === (b[k] || ''),
-  );
-}
 function automaticInstance(rows, candidate) {
-  const same = rows.filter((i) => sameSettings(i, candidate));
+  const same = rows.filter((i) => sameInstanceRoute(i, candidate));
   const exact =
     same.find((i) => i.id === candidate.id) ?? same.find((i) => i.name === candidate.name);
   if (exact) return exact;

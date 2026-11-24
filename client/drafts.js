@@ -1,3 +1,5 @@
+import { instanceSettingKeys as routeKeys } from '../route-compatibility.js';
+export { sameInstanceRoute } from '../route-compatibility.js';
 import {
   workflowRowId,
   builtinRoles,
@@ -19,8 +21,6 @@ function sameDraftValue(a, b) {
   );
 }
 
-const routeKeys = ['backend', 'provider', 'model', 'reasoningEffort', 'product', 'agentPreset'];
-export const sameInstanceRoute = (a, b) => !!a && routeKeys.every((key) => a[key] === b[key]);
 const projection = (obj, keys) =>
   Object.fromEntries(keys.filter((key) => obj[key] !== undefined).map((key) => [key, obj[key]]));
 

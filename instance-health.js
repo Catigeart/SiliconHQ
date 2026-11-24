@@ -81,7 +81,7 @@ export async function checkInstance(ctx, config, { id, live = false }, signal) {
       : instance.backend === readonlyCodex ||
         (base.capabilities.agentPreset && !base.inheritsParentContext);
     const checked = await whileActive(
-      checkedRoute(ctx, service, route, readOnly, undefined, true),
+      checkedRoute(ctx, service, route, readOnly, undefined, { includeCatalog: true }),
       signal,
     );
     spec = checked.spec;

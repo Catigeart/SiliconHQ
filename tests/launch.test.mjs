@@ -90,7 +90,15 @@ test('chat confirmation uses the previewed instance and returns its own one-time
     selected: 'review',
   });
   assert.equal(prepared.ok, true);
-  const { flow, token } = prepared.value;
+  const original = prepared.value.token;
+  const request = { sessionId: session.id, selected: 'review', replaces: original };
+  const refreshes = await Promise.all([
+    call('prepareLaunch', request),
+    call('prepareLaunch', request),
+  ]);
+  assert.equal(refreshes.filter((r) => r.ok).length, 1);
+  assert.equal((await invoke(original)).kind, 'error');
+  const { flow, token } = refreshes.find((r) => r.ok).value;
   assert.match(flow.summary, /Tester.+quick/);
   config.agentInstances[0].backend = 'changed-backend';
   config.templates[0].name = 'Replaced';
