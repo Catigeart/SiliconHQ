@@ -1,0 +1,21 @@
+- insert:
+    - id: siliconhq-command
+      name: dsh-sihq
+    - id: siliconhq-readonly-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: sihq-readonly
+        order: 99
+        plugins:
+          - id: sihq-readers
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              read: true
+              readImage: false
+              write: false
+              edit: false
+              applyPatch: false
+          - id: sihq-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false

@@ -1,0 +1,70 @@
+{
+  "name": "dsh-sihq",
+  "version": "0.14.3",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "sihq": "dist/cli.js"
+  },
+  "scripts": {
+    "build:core": "tsc && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "build:client": "node scripts/build-client.mjs",
+    "build": "npm run build:core && npm run build:client",
+    "check:host": "tsc -p tsconfig.host.json",
+    "check:client": "tsc -p tsconfig.client.json && node scripts/build-client.mjs --check",
+    "check": "npm run build:core && npm run check:host && npm run check:client",
+    "start": "node dist/cli.js",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "test:host": "node tests/host/run.mjs",
+    "format": "prettier --write \"src/**/*.ts\" \"client/**/*.js\" \"*.js\" \"!client.js\" \"scripts/*.mjs\" \"tests/**/*.mjs\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"client/**/*.js\" \"*.js\" \"!client.js\" \"scripts/*.mjs\" \"tests/**/*.mjs\""
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.2-rc.5",
+    "@openai/codex-sdk": "0.169.0",
+    "@types/node": "^22.20.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "esbuild": "0.28.2",
+    "fast-check": "4.11.0",
+    "prettier": "3.8.3",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-timeout": "0.2.2-rc.5",
+    "@deepseek-ai/schemastery": "3.19.0",
+    "zod": "4.6.7"
+  },
+  "files": [
+    "dist",
+    "*.js",
+    "cordis.patch.yml",
+    "sihq.config.json",
+    "UPSTREAM.md",
+    "docs"
+  ],
+  "description": "SiliconHQ development workflows for DeepSeek Harness",
+  "main": "./plugin.js",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-commands",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  },
+  "exports": {
+    ".": "./plugin.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  }
+}

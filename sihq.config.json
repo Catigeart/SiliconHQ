@@ -1,0 +1,19 @@
+{
+  "roles": {
+    "planner": {
+      "model": "gpt-6-astra",
+      "reasoningEffort": "medium",
+      "speed": "inherit"
+    },
+    "developer": {
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "medium",
+      "speed": "inherit"
+    },
+    "reviewer": {
+      "model": "gpt-6.1-terra",
+      "reasoningEffort": "high",
+      "speed": "inherit"
+    }
+  }
+}

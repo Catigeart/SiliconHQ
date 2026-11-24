@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "strictNullChecks": true,
+    "types": ["node"],
+    "skipLibCheck": true
+  },
+  "include": ["*.js"],
+  "exclude": ["client.js", "dist", "node_modules"]
+}
