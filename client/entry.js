@@ -29,7 +29,8 @@ function apply(ctx) {
       payload,
       signal,
     );
-    if (!response.ok) throw new Error(response.error.message);
+    if (!response.ok)
+      throw Object.assign(new Error(response.error.message), { code: response.error.code });
     return response.value;
   }
   const instanceCheck = (payload, signal) => call('instanceCheck', payload, signal);

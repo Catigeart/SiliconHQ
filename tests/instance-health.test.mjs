@@ -26,10 +26,13 @@ function fixture({
     agents: {
       async create(options) {
         seen.roots++;
-        assert.deepEqual(options.meta, { agentPreset: 'sihq-readonly' });
+        assert.deepEqual(options.meta, {
+          cwd: options.meta.cwd,
+          agentPreset: 'sihq-readonly',
+        });
         assert.equal(await options.setup({}), undefined);
         return {
-          agent: { id: options.sessionId },
+          agent: { id: options.sessionId, session: { header: options.meta } },
           dispose: async () => {
             seen.released++;
           },
@@ -42,6 +45,7 @@ function fixture({
           return { capabilities: { agentPreset: true, agentOptions: true } };
       },
       async startActivation(spec) {
+        assert.equal(spec.parent.session.header.cwd, spec.cwd);
         assert.ok(existsSync(spec.cwd));
         assert.deepEqual(readdirSync(spec.cwd), []);
         seen.calls.push(spec);

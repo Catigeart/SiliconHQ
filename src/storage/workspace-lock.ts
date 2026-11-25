@@ -11,15 +11,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { classify, ExecutionError, fault } from '../runtime/faults.js';
 import { processIdentity } from '../runtime/identity.js';
 
-type Workspace = { path: string; git: boolean; readerSlot?: number };
+type Workspace = { path: string; git: boolean; cwd?: string; readerSlot?: number };
 const readerKey = (path: string, slot: number) => keyFor(path + '\0reader:' + slot);
 
 function workspaceFor(cwd: string): Workspace {
   const project = canonicalProjectDirectory(cwd);
   for (let path = project; ; path = dirname(path)) {
     // Git uses a .git directory for a checkout or a .git file for a linked worktree/submodule.
-    if (existsSync(join(path, '.git'))) return { path, git: true };
-    if (dirname(path) === path) return { path: project, git: false };
+    if (existsSync(join(path, '.git'))) return { path, git: true, cwd: project };
+    if (dirname(path) === path) return { path: project, git: false, cwd: project };
   }
 }
 
@@ -33,8 +33,13 @@ function contains(parent: string, child: string): boolean {
 }
 
 function overlap(a: Workspace, b: Workspace): boolean {
-  // Separate Git roots (including nested worktrees) have independent locks.
-  if (a.git && b.git) return a.path === b.path;
+  // A new nested checkout can enclose an existing job's actual cwd. Other
+  // nested worktrees stay independent. Older markers lack the execution cwd.
+  if (a.git && b.git && a.path !== b.path)
+    return (
+      (contains(a.path, b.path) && (!a.cwd || contains(b.path, a.cwd))) ||
+      (contains(b.path, a.path) && (!b.cwd || contains(a.path, b.cwd)))
+    );
   return contains(a.path, b.path) || contains(b.path, a.path);
 }
 
@@ -70,7 +75,7 @@ function checkOverlappingOwners(
     if (!entry.isDirectory() || entry.name === key || !/^[a-f0-9]{36}$/.test(entry.name)) continue;
     const directory = join(root, entry.name);
     const file = join(directory, 'lock');
-    if (!existsSync(file)) continue;
+    if (!existsSync(file) && !existsSync(file + '.sqlite')) continue;
     const held = readWorkspace(directory, entry.name);
     // Checking process start times on Windows can launch PowerShell. A verified
     // directory marker excludes unrelated owners without any process lookup.
@@ -119,9 +124,11 @@ export function lockTemplateWorkspace(
       admission.exec('BEGIN IMMEDIATE');
       const conflicts = !importStops
         ? []
-        : importStops().filter((stop) => overlap(workspace, { path: stop.path, git: !!stop.git }));
+        : importStops().filter((stop) =>
+            overlap(workspace, { path: stop.path, git: !!stop.git, cwd: stop.cwd ?? undefined }),
+          );
       const owns = (stop: (typeof conflicts)[number]) =>
-        recoveringFlow === stop.flowId && workspace.path === stop.path;
+        recoveringFlow === stop.flowId && (!stop.cwd || workspace.cwd === stop.cwd);
       const other = conflicts.find((stop) => !owns(stop));
       // An old profile may have several waiting jobs in one checkout. Each owner can
       // reconcile its own job under the lease, then must pass this gate before running.
@@ -155,7 +162,11 @@ export function lockTemplateWorkspace(
         release();
         throw error;
       }
-      return { release, assertReady };
+      return {
+        release,
+        assertReady,
+        stopsFor: (flowId: string) => verificationStops(workspace, flowId),
+      };
     } finally {
       admission.close();
     }

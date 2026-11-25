@@ -147,6 +147,7 @@ function LaunchDialog({
                   await refresh();
                 } catch (error) {
                   setError(error.message);
+                  if (error.code === 'sihq/preview-unavailable') setUncertain(true);
                   setRefreshing(false);
                   inFlight.current = false;
                 }

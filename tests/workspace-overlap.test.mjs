@@ -322,6 +322,83 @@ test('first admission migrates unresolved v0.14.1 jobs and fences overlapping wr
   lockWorkspace(child)();
 });
 
+for (const nestedCheckout of [false, true]) {
+  test(
+    'verification ownership survives creating a Git root at the ' +
+      (nestedCheckout ? 'execution directory' : 'parent'),
+    (t) => {
+      const { home, parent, child } = fixture(t);
+      if (nestedCheckout) mkdirSync(join(parent, '.git'));
+      const id = new WorkflowStore().create('verify', child, 0).id;
+      const original = lockTemplateWorkspace(child, 'write', id);
+      original.stopsFor(id).remember('run', 'pending-shell');
+      mkdirSync(join(nestedCheckout ? child : parent, '.git'));
+      assert.throws(() => lockWorkspace(child), /pending-shell/);
+      assert.throws(() => lockTemplateWorkspace(child, 'write', id), /正在运行/);
+      original.release();
+      assert.throws(() => lockWorkspace(child), /pending-shell/);
+      const independent = join(home, 'another');
+      mkdirSync(independent);
+      lockWorkspace(independent)();
+      const recovery = lockTemplateWorkspace(child, 'write', id);
+      assert.deepEqual(
+        recovery
+          .stopsFor(id)
+          .pending()
+          .map((r) => r.jobId),
+        ['pending-shell'],
+      );
+      recovery.stopsFor(id).confirmed('pending-shell');
+      recovery.assertReady();
+      recovery.release();
+      lockWorkspace(child)();
+    },
+  );
+}
+
+test('v0.14.4 stop rows retain the original root and recover their execution cwd from the journal', (t) => {
+  const { home, parent, child } = fixture(t);
+  mkdirSync(join(parent, '.git'));
+  const store = new WorkflowStore();
+  const flow = store.create('old job', child, 0);
+  flow.steps = [
+    {
+      stage: 'verify',
+      status: 'failed',
+      startedAt: flow.createdAt,
+      runId: 'old-run',
+      stoppingJobId: 'old-job',
+    },
+  ];
+  store.save(flow);
+  const directory = join(home, '.llm-coder', 'workspace-locks');
+  mkdirSync(directory, { recursive: true });
+  const db = new DatabaseSync(join(directory, 'admission.sqlite'));
+  try {
+    db.exec(
+      'CREATE TABLE verification_stops(flowId TEXT, runId TEXT, jobId TEXT, path TEXT, git INTEGER, PRIMARY KEY(flowId,jobId)); CREATE TABLE verification_sources(flowId TEXT PRIMARY KEY, stamp TEXT NOT NULL)',
+    );
+    db.prepare('INSERT INTO verification_stops VALUES (?,?,?,?,?)').run(
+      flow.id,
+      'old-run',
+      'old-job',
+      parent,
+      1,
+    );
+    mkdirSync(join(child, '.git'));
+    assert.throws(() => lockWorkspace(child), /old-job/);
+    const row = db.prepare('SELECT path,cwd FROM verification_stops').get();
+    assert.equal(row.path, parent);
+    assert.equal(row.cwd, child);
+    const lease = lockTemplateWorkspace(child, 'write', flow.id);
+    lease.stopsFor(flow.id).confirmed('old-job');
+    lease.release();
+    lockWorkspace(child)();
+  } finally {
+    db.close();
+  }
+});
+
 test('two legacy owners can reconcile independently before new work is admitted', (t) => {
   const { parent } = fixture(t);
   const lease = lockWorkspace(parent);

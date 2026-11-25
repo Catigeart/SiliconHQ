@@ -319,9 +319,12 @@ test('cancelling recovery of an old shell Job retains both locks until actual te
   lockWorkspace(cwd)();
 });
 
-test('an unconfirmed verifier fences other writers across recovery attempts', async (t) => {
-  const cwd = mkdtempSync(join(tmpdir(), 'sihq-fenced-'));
-  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+test('an unconfirmed verifier fences other writers across a checkout change and recovery attempts', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'sihq-fenced-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, '.git'));
+  const cwd = join(root, 'project');
+  mkdirSync(cwd);
   const flows = new WorkflowStore(join(cwd, 'flows')),
     runs = new RunStore(join(cwd, 'runs'));
   const base = {
@@ -351,6 +354,7 @@ test('an unconfirmed verifier fences other writers across recovery attempts', as
     },
   });
   assert.equal(first.status, 'failed');
+  mkdirSync(join(cwd, '.git'));
   const retry = { action: 'retry', id: first.id };
   const stopped = {
     jobId: 'old-job',

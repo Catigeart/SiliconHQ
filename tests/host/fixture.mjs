@@ -1,4 +1,4 @@
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -45,7 +45,31 @@ class LocalAdapter extends LlmAdapter {
         }) + '\n',
       );
     record('start');
-    if (!props) {
+    if (
+      !props &&
+      input.includes('请通过 product_submit') &&
+      !existsSync(join(process.env.SIHQ_TEST_DIR, 'relay-echo-only')) &&
+      !input.includes('tool-result') &&
+      !request.messages.some((m) => m.role === 'tool')
+    ) {
+      const task = '请回复 SIHQ_OK。';
+      const direct = request.tools?.some((t) => t.name === 'product_submit');
+      yield {
+        type: 'tool-call-delta',
+        index: 0,
+        id: randomUUID(),
+        name: direct ? 'product_submit' : 'run_code',
+        argumentsDelta: JSON.stringify(
+          direct
+            ? { task }
+            : {
+                description: '社区后端连通性',
+                code: 'return await tools.product_submit(' + JSON.stringify({ task }) + ')',
+              },
+        ),
+      };
+      yield { type: 'finish', reason: 'tool-calls' };
+    } else if (!props) {
       yield {
         type: 'text-delta',
         index: 0,

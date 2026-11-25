@@ -177,11 +177,39 @@ if (opts['product-package']) {
   );
   if ((await once(product, 'close'))[0] !== 0) throw Error('See product-install.log');
   const name = 'sihq-cwd-test';
+  const preload = join(run, 'probe-cwd.cjs');
+  writeFileSync(
+    preload,
+    [
+      "if (process.argv.slice(2).some(arg => arg.includes('SIHQ_OK'))) {",
+      "  const fs = require('node:fs');",
+      "  fs.writeFileSync(process.env.SIHQ_CWD_RESULT, JSON.stringify({ cwd: process.cwd(), entries: fs.readdirSync('.') }));",
+      "  fs.writeSync(1, 'SIHQ_OK');",
+      '  process.exit(0);',
+      '}',
+    ].join('\n'),
+  );
+  patch
+    .find((entry) => entry.id === 'siliconhq-command')
+    .config.agentInstances.push({
+      id: 'cwd-health',
+      name: 'Smoke 实例目录',
+      backend: 'checkout-test:' + name,
+    });
   patch.push({
     id: 'product-subagents',
     config: {
       providerNamespace: 'checkout-test',
-      providers: { [name]: { type: 'codex', command: process.execPath } },
+      providers: {
+        [name]: {
+          type: 'codex',
+          command: process.execPath,
+          env: {
+            NODE_OPTIONS: '--require "' + preload.replaceAll('\\', '/') + '"',
+            SIHQ_CWD_RESULT: join(run, 'health-cwd.json'),
+          },
+        },
+      },
     },
   });
   patch

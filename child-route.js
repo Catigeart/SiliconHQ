@@ -27,12 +27,19 @@ export function liveChildRoute(ctx, childId, parentId, provider) {
   }
 }
 
-export async function readChildRouteEvidence(ctx, childId, parentId, provider) {
+export async function readChildTurn(
+  ctx,
+  childId,
+  parentId,
+  provider,
+  inspect,
+  signal = AbortSignal.timeout(3000),
+) {
   const query = ctx.get('sessionQuery');
   if (!query?.observeSession) return;
   let lease;
   try {
-    lease = await query.observeSession(childId, { signal: AbortSignal.timeout(3000) });
+    lease = await query.observeSession(childId, { signal });
     if (!ownedChild(lease.header, childId, parentId)) return;
     const offset = lease.inheritedEventCount;
     if (!Number.isSafeInteger(offset) || offset < 0) return;
@@ -47,23 +54,8 @@ export async function readChildRouteEvidence(ctx, childId, parentId, provider) {
       descriptor.provider !== provider
     )
       return;
-    // A later continuation can select another model. Inspect only the first
-    // request of the original delegation, up to the end of that turn.
-    for (let i = index + 1; i < events.length; i++) {
-      const event = events[i];
-      if (event.type === 'turn/end') break;
-      if (event.type === 'request/header') {
-        const route = modelRoute(event.data?.header?.config);
-        if (route) return { route, fromRequest: true };
-        break;
-      }
-    }
-    const route = modelRoute({
-      provider: descriptor.agentProvider,
-      model: descriptor.agentModel,
-      reasoningEffort: descriptor.agentReasoningEffort,
-    });
-    if (route) return { route, fromRequest: false };
+    const end = events.findIndex((event, i) => i > index && event.type === 'turn/end');
+    return inspect(descriptor, events.slice(index + 1, end === -1 ? undefined : end));
   } catch {
     // External, expired and unsupported historical sessions have no readable route.
   } finally {
@@ -73,4 +65,18 @@ export async function readChildRouteEvidence(ctx, childId, parentId, provider) {
       // A closing host must not hide the workflow's independently saved report.
     }
   }
+}
+
+export function readChildRouteEvidence(ctx, childId, parentId, provider) {
+  return readChildTurn(ctx, childId, parentId, provider, (descriptor, events) => {
+    const request = events.find((event) => event.type === 'request/header');
+    const actual = modelRoute(request?.data?.header?.config);
+    if (actual) return { route: actual, fromRequest: true };
+    const route = modelRoute({
+      provider: descriptor.agentProvider,
+      model: descriptor.agentModel,
+      reasoningEffort: descriptor.agentReasoningEffort,
+    });
+    if (route) return { route, fromRequest: false };
+  });
 }

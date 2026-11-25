@@ -22,7 +22,7 @@ export function registerLaunchPreviews(ctx, config, endpoint, trials) {
   async function publishPreview(trial, plan, flow, signal) {
     const now = Date.now();
     for (const [key, entry] of trials)
-      if (!entry.submitting && entry.expiry <= now) trials.delete(key);
+      if (key !== trial.replaces && !entry.submitting && entry.expiry <= now) trials.delete(key);
     const preflight = await preflightWorkflow(ctx, plan, trial.cwd, {
       signal,
       onBaseline(baseline) {
@@ -35,8 +35,9 @@ export function registerLaunchPreviews(ctx, config, endpoint, trials) {
       (route) => ctx.get('subagents')?.getProvider(route.backend)?.inheritsParentContext === true,
     );
     const previous = trial.replaces && trials.get(trial.replaces);
-    if (previous) {
+    if (trial.replaces !== undefined) {
       if (
+        !previous ||
         previous.sessionId !== trial.sessionId ||
         previous.receipt ||
         previous.submitting ||
@@ -44,11 +45,24 @@ export function registerLaunchPreviews(ctx, config, endpoint, trials) {
         previous.selected !== trial.selected ||
         previous.flowId !== trial.flowId
       )
-        throw new Error('原预览已提交或变更，请查看本会话运行记录。');
+        throw Object.assign(
+          new Error(
+            '原预览已提交、已过期或已变更，请查看本会话运行记录。确认需要新建任务后，可重新打开 /sihq。',
+          ),
+          { code: 'sihq/preview-unavailable' },
+        );
       previous.superseded = true;
     }
     const token = randomUUID();
-    trials.set(token, Object.assign(trial, { diffRequired, preflight, expiry: now + 30 * 60_000 }));
+    trials.set(
+      token,
+      Object.assign(trial, {
+        requestId: previous?.requestId ?? token,
+        diffRequired,
+        preflight,
+        expiry: Date.now() + 30 * 60_000,
+      }),
+    );
     return {
       token,
       flow: {
@@ -184,13 +198,34 @@ export function registerLaunchPreviews(ctx, config, endpoint, trials) {
   endpoint('commandReceipt', ({ sessionId, seq }) => {
     if (!Number.isSafeInteger(seq) || seq < 0) throw new Error('无效的指令回执');
     const event = ctx.get('agents')?.get(sessionId)?.session?.eventAt(seq);
-    if (event?.type !== 'sihq/launch') throw new Error('本会话没有该启动回执');
+    if (
+      event?.type !== 'sihq/launch' ||
+      (event.data.sessionId && event.data.sessionId !== sessionId)
+    )
+      throw new Error('本会话没有该启动回执');
     return event.data;
   });
   endpoint('launchReceipt', async ({ sessionId, token }) => {
     const entry = trials.get(token);
-    if (!entry?.receipt || entry.sessionId !== sessionId || Date.now() > entry.expiry)
-      throw new Error('请从本会话的运行记录查看已提交的任务。');
+    if (!entry?.receipt || entry.sessionId !== sessionId || Date.now() > entry.expiry) {
+      const session = ctx.get('agents')?.get(sessionId)?.session;
+      const events = session?.snapshotEvents?.() ?? session?.events ?? [];
+      const saved =
+        typeof token === 'string' &&
+        events.findLast(
+          (event) =>
+            event.type === 'sihq/launch' &&
+            event.data?.sessionId === sessionId &&
+            [event.data.jobId, event.data.requestId, event.data.previewToken].includes(token),
+        )?.data;
+      if (!saved) throw new Error('请从本会话的运行记录查看已提交的任务。');
+      return {
+        jobId: saved.jobId,
+        ...(!saved.flowId && !saved.error && { historyOnly: true }),
+        ...(saved.flowId && { flowId: saved.flowId }),
+        ...(saved.error && { error: saved.error }),
+      };
+    }
     if (!entry.receipt.flowId && !entry.receipt.error) {
       // A host may schedule its producer after acknowledging the command.
       let timer;

@@ -5,10 +5,18 @@ import { isAbsolute, join } from 'node:path';
 import { dataDirectory } from './files.js';
 import { readWorkflowProjection, workflowFileStamp } from './workflow-history.js';
 
-type Workspace = { path: string; git: boolean };
-type Pending = { flowId: string; runId: string; jobId: string; path: string; git: number };
+type Workspace = { path: string; git: boolean; cwd?: string };
+type Pending = {
+  flowId: string;
+  runId: string;
+  jobId: string;
+  path: string;
+  git: number;
+  cwd: string | null;
+};
 const insert =
-  'INSERT OR IGNORE INTO verification_stops(flowId,runId,jobId,path,git) VALUES (?,?,?,?,?)';
+  'INSERT INTO verification_stops(flowId,runId,jobId,path,git,cwd) VALUES (?,?,?,?,?,?) ' +
+  'ON CONFLICT(flowId,jobId) DO UPDATE SET cwd=excluded.cwd WHERE verification_stops.cwd IS NULL AND verification_stops.runId=excluded.runId';
 
 function legacyStops(dir: string, id: string): { cwd: string; runId: string; jobId: string }[] {
   type Row = { cwd: string; runId: string; jobId: string };
@@ -124,9 +132,25 @@ export function prepareWorkspaceStops(
   overlaps: (candidate: Workspace) => boolean,
 ) {
   db.exec(
-    'CREATE TABLE IF NOT EXISTS verification_stops(flowId TEXT, runId TEXT, jobId TEXT, path TEXT, git INTEGER, PRIMARY KEY(flowId,jobId));' +
+    'CREATE TABLE IF NOT EXISTS verification_stops(flowId TEXT, runId TEXT, jobId TEXT, path TEXT, git INTEGER, cwd TEXT, PRIMARY KEY(flowId,jobId));' +
       'CREATE TABLE IF NOT EXISTS verification_sources(flowId TEXT PRIMARY KEY, stamp TEXT NOT NULL)',
   );
+  const hasCwd = () =>
+    db.prepare("SELECT 1 FROM pragma_table_info('verification_stops') WHERE name='cwd'").get();
+  if (!hasCwd()) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      if (!hasCwd()) {
+        db.exec(
+          'ALTER TABLE verification_stops ADD COLUMN cwd TEXT; DELETE FROM verification_sources',
+        );
+      }
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
   const inventory = sources();
   const source = db.prepare('SELECT stamp FROM verification_sources WHERE flowId=?');
   const changes = new Map<string, Pending[]>();
@@ -136,7 +160,7 @@ export function prepareWorkspaceStops(
     try {
       const rows = legacyStops(dir, id).map(({ cwd, runId, jobId }) => {
         const ws = existsSync(cwd) ? locate(cwd) : { path: cwd, git: false };
-        return { flowId: id, runId, jobId, path: ws.path, git: Number(ws.git) };
+        return { flowId: id, runId, jobId, path: ws.path, git: Number(ws.git), cwd: ws.cwd ?? cwd };
       });
       changes.set(id, rows);
     } catch (error) {
@@ -167,7 +191,7 @@ export function prepareWorkspaceStops(
     for (const [id, rows] of changes) {
       const stamp = inventory.get(id)!;
       if (source.get(id)?.stamp === stamp) continue;
-      for (const row of rows) add.run(id, row.runId, row.jobId, row.path, row.git);
+      for (const row of rows) add.run(id, row.runId, row.jobId, row.path, row.git, row.cwd);
       scanned.run(id, stamp);
     }
     return db.prepare('SELECT * FROM verification_stops').all() as Pending[];
@@ -195,7 +219,16 @@ export function verificationStops(workspace: Workspace, flowId: string) {
       ),
     remember: (runId: string, jobId: string) =>
       access((db) =>
-        db.prepare(insert).run(flowId, runId, jobId, workspace.path, Number(workspace.git)),
+        db
+          .prepare(insert)
+          .run(
+            flowId,
+            runId,
+            jobId,
+            workspace.path,
+            Number(workspace.git),
+            workspace.cwd ?? workspace.path,
+          ),
       ),
     confirmed: (jobId: string) =>
       access((db) =>

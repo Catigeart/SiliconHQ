@@ -45,50 +45,98 @@ export function hasLiveLock(file: string): boolean {
   const owner = legacyOwner(file);
   return !!owner && ownerAlive(owner);
 }
+function transaction(db: DatabaseSync, fn: () => void, undoMarker?: () => void) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    fn();
+    db.exec('COMMIT');
+  } catch (error) {
+    try {
+      undoMarker?.();
+    } finally {
+      db.exec('ROLLBACK');
+    }
+    throw error;
+  }
+}
 export function lockFile(file: string, identity: ProcessIdentity = processIdentity()): () => void {
   const db = new DatabaseSync(file + '.sqlite');
   const owner = { ...identity, token: randomUUID() };
-  const transaction = (fn: () => void) => {
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      fn();
-      db.exec('COMMIT');
-    } catch (error) {
-      db.exec('ROLLBACK');
-      throw error;
-    }
-  };
+  let publishing = false;
   try {
     db.exec(
       'PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS owner (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);',
     );
-    transaction(() => {
-      const old = databaseOwner(db);
-      if (old && ownerAlive(old)) throw fault('resource', 'LOCKED', '该任务正在运行，不能同时恢复');
-      // Respect locks from versions that did not have the transactional owner row.
-      const legacy = legacyOwner(file);
-      if (legacy && ownerAlive(legacy))
-        throw fault('resource', 'LOCKED', '该任务正在运行，不能同时恢复');
-      db.prepare('INSERT OR REPLACE INTO owner VALUES (1, ?)').run(JSON.stringify(owner));
-      atomicJson(file, owner);
-    });
-  } catch (error) {
+    transaction(
+      db,
+      () => {
+        const old = databaseOwner(db);
+        if (old && ownerAlive(old))
+          throw fault('resource', 'LOCKED', '该任务正在运行，不能同时恢复');
+        // Respect locks from versions that did not have the transactional owner row.
+        const legacy = legacyOwner(file);
+        if (legacy && ownerAlive(legacy))
+          throw fault('resource', 'LOCKED', '该任务正在运行，不能同时恢复');
+        db.prepare('INSERT OR REPLACE INTO owner VALUES (1, ?)').run(JSON.stringify(owner));
+        publishing = true;
+        atomicJson(file, owner);
+      },
+      () => {
+        if (publishing && legacyOwner(file)?.token === owner.token) rmSync(file);
+      },
+    );
+  } finally {
     db.close();
-    throw error;
   }
   let released = false;
-  return () => {
+  let retry: NodeJS.Timeout | undefined;
+  let retryDelay = 100;
+  function release() {
     if (released) return;
-    released = true;
+    const db = new DatabaseSync(file + '.sqlite');
     try {
-      transaction(() => {
-        if (databaseOwner(db)?.token === owner.token) {
-          if (legacyOwner(file)?.token === owner.token) rmSync(file);
-          db.prepare('DELETE FROM owner WHERE id=1').run();
-        }
-      });
+      db.exec('PRAGMA busy_timeout=100');
+      let removed = false;
+      transaction(
+        db,
+        () => {
+          if (databaseOwner(db)?.token === owner.token) {
+            if (legacyOwner(file)?.token === owner.token) {
+              rmSync(file);
+              removed = true;
+            }
+            db.prepare('DELETE FROM owner WHERE id=1').run();
+          }
+        },
+        () => {
+          if (removed) atomicJson(file, owner);
+        },
+      );
+      released = true;
+      clearTimeout(retry);
+    } catch (error) {
+      const { errcode, code } = error as { errcode?: number; code?: string };
+      if (
+        !retry &&
+        ([5, 6].includes((errcode ?? 0) & 255) || code === 'EBUSY' || code === 'EPERM')
+      ) {
+        // Most finally blocks drop the release handle after one call. Keep
+        // cleaning up while this process (the durable owner) is still alive.
+        retry = setTimeout(() => {
+          retry = undefined;
+          try {
+            release();
+          } catch (failure) {
+            if (!retry) console.warn('[SiliconHQ] 释放运行锁失败', file, failure);
+          }
+        }, retryDelay);
+        retry.unref();
+        retryDelay = Math.min(5000, retryDelay * 2);
+      }
+      throw error;
     } finally {
       db.close();
     }
-  };
+  }
+  return release;
 }

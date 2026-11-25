@@ -19,10 +19,7 @@ import { z } from 'zod';
 import { validateCriteriaReview } from './dist/roles/reviewer.js';
 import { buildStepInput, stepReportSchema } from './step-prompt.js';
 export { previewStepInput } from './step-prompt.js';
-import {
-  lockTemplateWorkspace,
-  workspaceVerificationStops,
-} from './dist/storage/workspace-lock.js';
+import { lockTemplateWorkspace } from './dist/storage/workspace-lock.js';
 
 const stageOf = (kind) => (kind === 'develop' ? 'implement' : kind);
 
@@ -429,7 +426,11 @@ export async function runTemplate({
   const shared = plan.template.steps.every((node) =>
     ['read', 'plan', 'review', 'approval'].includes(node.kind),
   );
-  const { release: releaseWorkspace, assertReady } = lockTemplateWorkspace(
+  const {
+    release: releaseWorkspace,
+    assertReady,
+    stopsFor,
+  } = lockTemplateWorkspace(
     cwd,
     shared ? 'read' : 'write',
     request.action === 'start' ? undefined : request.id,
@@ -466,7 +467,7 @@ export async function runTemplate({
       flows.save(flow);
       observer.onUpdate(flow);
     };
-    const stops = workspaceVerificationStops(cwd, flow.id);
+    const stops = stopsFor(flow.id);
     function recordStopping(entry, jobId) {
       if (jobId) {
         stops.remember(entry.runId, jobId);
@@ -661,8 +662,8 @@ export async function runTemplate({
   } finally {
     if (cleanup)
       void cleanup()
-        .catch((error) => console.warn('[SiliconHQ] 验证任务清理失败 · ' + error.message))
-        .finally(unlock);
+        .finally(unlock)
+        .catch((error) => console.warn('[SiliconHQ] 验证任务清理失败 · ' + error.message));
     else unlock();
   }
 }

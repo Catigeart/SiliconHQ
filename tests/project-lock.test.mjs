@@ -5,7 +5,9 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { lockFile } from '../dist/storage/lock.js';
+import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
+import { hasLiveLock, lockFile } from '../dist/storage/lock.js';
 import { canonicalProjectDirectory, sameProjectDirectory } from '../dist/storage/project-path.js';
 import { lockWorkspace } from '../dist/storage/workspace-lock.js';
 
@@ -21,6 +23,37 @@ function isolatedHome(t) {
   });
   return root;
 }
+
+test('a busy release can be retried by its caller or by cleanup after the caller returns', async (t) => {
+  const root = isolatedHome(t);
+  for (const explicit of [true, false]) {
+    const file = join(root, 'lock-' + explicit);
+    const release = lockFile(file);
+    const other = new DatabaseSync(file + '.sqlite');
+    try {
+      other.exec('BEGIN IMMEDIATE');
+      assert.throws(release, (error) => error.errcode === 5);
+      assert.ok(hasLiveLock(file));
+      other.exec('ROLLBACK');
+      if (explicit) release();
+      else {
+        const until = Date.now() + 5000;
+        while (hasLiveLock(file) && Date.now() < until) await delay(25);
+      }
+      assert.equal(hasLiveLock(file), false);
+      const next = lockFile(file);
+      try {
+        release();
+        await delay(150);
+        assert.ok(hasLiveLock(file));
+      } finally {
+        next();
+      }
+    } finally {
+      other.close();
+    }
+  }
+});
 
 test('aliases share one project identity and lock', (t) => {
   const root = isolatedHome(t),

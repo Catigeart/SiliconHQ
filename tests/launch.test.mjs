@@ -8,8 +8,21 @@ import { hasActiveWorkflowJob, submitWorkflow } from '../native.js';
 import { WorkflowStore } from '../dist/storage/workflows.js';
 import { RunStore } from '../dist/storage/runs.js';
 
-test('chat confirmation uses the previewed instance and returns its own one-time receipt', async () => {
-  const session = { id: 'chat', session: { header: { cwd: process.cwd() } } };
+function chatFixture() {
+  const events = [];
+  const session = {
+    id: 'chat',
+    session: {
+      header: { cwd: process.cwd() },
+      snapshotEvents: () => events,
+      eventAt: (seq) => events[seq],
+      append(type, data) {
+        const event = { type, data, seq: events.length };
+        events.push(event);
+        return event;
+      },
+    },
+  };
   const config = {
     agentInstances: [{ id: 'tester', name: 'Tester', backend: 'spawn', model: 'quick' }],
     templates: [
@@ -64,7 +77,7 @@ test('chat confirmation uses the previewed instance and returns its own one-time
         return {
           start() {
             jobsStarted++;
-            return 'this-job';
+            return 'job-' + jobsStarted;
           },
         };
     },
@@ -85,6 +98,20 @@ test('chat confirmation uses the previewed instance and returns its own one-time
       agent,
       rawInput: JSON.stringify(['launch', token, 'do it']),
     });
+  return {
+    call,
+    invoke,
+    session,
+    config,
+    lookedUp,
+    count: () => jobsStarted,
+    reload: () => apply(ctx, config),
+    direct: () => command.handler({ agent: session, rawInput: 'run review "Run from chat"' }),
+  };
+}
+
+test('chat confirmation uses the previewed instance and returns its own one-time receipt', async () => {
+  const { call, invoke, session, config, lookedUp, count, direct } = chatFixture();
   const prepared = await call('prepareLaunch', {
     sessionId: session.id,
     selected: 'review',
@@ -107,24 +134,54 @@ test('chat confirmation uses the previewed instance and returns its own one-time
   const competing = await Promise.all([invoke(token), invoke(token)]);
   assert.equal(competing.filter((result) => result.kind === 'success').length, 1);
   assert.match(competing.find((result) => result.kind === 'success').text, /Review 已启动/);
-  assert.equal(jobsStarted, 1);
+  assert.equal(count(), 1);
   assert.deepEqual([...new Set(lookedUp)], ['spawn']);
   assert.equal((await invoke(token)).kind, 'error');
   assert.equal((await call('launchReceipt', { sessionId: 'another', token })).ok, false);
   assert.equal(
     (await call('launchReceipt', { sessionId: session.id, token })).value.jobId,
-    'this-job',
+    'job-1',
   );
-  const direct = await command.handler({ agent: session, rawInput: 'run review "Run from chat"' });
-  assert.match(direct.text, /DSH 后台任务 this-job/);
+  const launched = await direct();
+  assert.match(launched.text, /DSH 后台任务 job-2/);
+  assert.equal((await call('launchReceipt', { sessionId: 'another', token: 'job-2' })).ok, false);
   assert.equal(
-    (await call('launchReceipt', { sessionId: 'another', token: 'this-job' })).ok,
-    false,
+    (await call('launchReceipt', { sessionId: session.id, token: 'job-2' })).value.jobId,
+    'job-2',
   );
-  assert.equal(
-    (await call('launchReceipt', { sessionId: session.id, token: 'this-job' })).value.jobId,
-    'this-job',
+});
+
+test('expired and reloaded previews cannot duplicate a launch whose acknowledgement was lost', async (t) => {
+  const { call, invoke, count, reload } = chatFixture();
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const input = { sessionId: 'chat', selected: 'review' };
+  const first = (await call('prepareLaunch', input)).value.token;
+  now += 31 * 60_000;
+  const refreshed = await Promise.all(
+    [1, 2].map(() => call('prepareLaunch', { ...input, replaces: first })),
   );
+  assert.equal(refreshed.filter((r) => r.ok).length, 1);
+  const token = refreshed.find((r) => r.ok).value.token;
+  assert.equal((await invoke(token)).kind, 'success');
+  now += 61_000;
+  for (const reset of [false, true]) {
+    if (reset) reload();
+    const retry = await call('prepareLaunch', { ...input, replaces: token });
+    assert.equal(retry.ok, false);
+    assert.match(retry.error.message, /本会话运行记录/);
+    assert.equal((await invoke(token)).kind, 'error');
+    for (const key of [first, token, 'job-1'])
+      assert.equal(
+        (await call('launchReceipt', { sessionId: 'chat', token: key })).value.jobId,
+        'job-1',
+      );
+    assert.equal((await call('launchReceipt', { sessionId: 'other', token })).ok, false);
+    assert.equal(count(), 1);
+  }
+  const fresh = (await call('prepareLaunch', input)).value.token;
+  assert.equal((await invoke(fresh)).kind, 'success');
+  assert.equal(count(), 2);
 });
 
 test('a delayed job publishes its flow ID and a human decision survives a removed provider', async (t) => {
@@ -134,7 +191,17 @@ test('a delayed job publishes its flow ID and a human decision survives a remove
     flows: new WorkflowStore(join(dir, 'flows')),
     runs: new RunStore(join(dir, 'runs')),
   };
-  const parent = { id: 'chat', session: { header: { cwd: dir } } };
+  const events = [];
+  const parent = {
+    id: 'chat',
+    session: {
+      header: { cwd: dir },
+      append(type, data) {
+        events.push({ type, data });
+        return { seq: events.length - 1 };
+      },
+    },
+  };
   const template = {
     id: 'gated',
     name: 'Gated',
@@ -179,6 +246,11 @@ test('a delayed job publishes its flow ID and a human decision survives a remove
     assert.equal(hasActiveWorkflowJob(receipt.flowId), true);
     await ready;
     assert.ok(receipt.flowId);
+    await Promise.resolve();
+    const recorded = events.findLast(
+      (e) => e.type === 'sihq/launch' && e.data.jobId === receipt.jobId,
+    );
+    assert.equal(recorded.data.flowId, receipt.flowId);
     assert.equal((await done).status, 'completed');
     assert.equal(hasActiveWorkflowJob(receipt.flowId), false);
     const waiting = stores.flows.read(receipt.flowId);

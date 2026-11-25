@@ -421,15 +421,24 @@ export function submitWorkflow(ctx, config, parent, request, flags, controllers,
   receipt.jobId = jobId;
   if (receipt.flowId) activeJobs.set(receipt.flowId, receipt);
   flags.onStarted?.(receipt, ready.promise);
-  let sourceEventSeq;
-  try {
-    sourceEventSeq = parent.session?.append?.('sihq/launch', {
-      jobId,
-      ...(receipt.flowId && { flowId: receipt.flowId }),
-    })?.seq;
-  } catch (error) {
-    ctx.logger?.warn?.('无法保存 SiliconHQ 启动回执：' + message(error));
+  function recordReceipt() {
+    try {
+      return parent.session?.append?.('sihq/launch', {
+        jobId,
+        sessionId: parent.id,
+        ...(flags.requestId && { requestId: flags.requestId, previewToken: flags.previewToken }),
+        ...(receipt.flowId && { flowId: receipt.flowId }),
+        ...(receipt.error && { error: receipt.error }),
+      })?.seq;
+    } catch (error) {
+      ctx.logger?.warn?.('无法保存 SiliconHQ 启动回执：' + message(error));
+    }
   }
+  const sourceEventSeq = recordReceipt();
+  if (!receipt.flowId && !receipt.error)
+    void ready.promise.then(() => {
+      if (receipt.flowId || receipt.error) recordReceipt();
+    });
   return {
     ...(Number.isSafeInteger(sourceEventSeq) && { sourceEventSeq }),
     kind: 'success',

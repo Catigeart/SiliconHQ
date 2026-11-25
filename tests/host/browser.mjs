@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { appendFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import {
   badName,
   capacityName,
@@ -136,6 +136,27 @@ export async function verify({
         'Installed Product Subagents 0.4.1 used the original cwd; SIHQ rejected dispatch in the switched checkout.',
         probe,
       );
+      await page.keyboard.press('Escape');
+      await settings();
+      await button('管理 Agent 实例').click();
+      const instance = row('Smoke 实例目录');
+      await button('更多操作', instance).click();
+      await page.getByRole('menuitem', { name: '检查配置' }).click();
+      await button('实际委派测试', instance).click();
+      await instance.getByText(/已收到指定回复 SIHQ_OK/).waitFor();
+      const health = JSON.parse(readFileSync(join(run, 'health-cwd.json'), 'utf8'));
+      assert.deepEqual(health.entries, []);
+      assert.ok(/^sihq-instance-test-/.test(basename(health.cwd)));
+      assert.equal(resolve(dirname(health.cwd)), resolve(run, 'temp'));
+      assert.equal(existsSync(health.cwd), false);
+      pass(
+        'Instance health used an empty temporary cwd in the real product subprocess and removed it.',
+        health,
+      );
+      appendFileSync(join(run, 'relay-echo-only'), '1');
+      await button('实际委派测试', instance).click();
+      await instance.getByText(/未确认产品实际回复 SIHQ_OK/).waitFor();
+      pass('A relay-only echo failed the same instance check.');
       return;
     }
     if (shellProbe) {

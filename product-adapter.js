@@ -33,9 +33,7 @@ export function productEntries(ctx) {
 
 // Product Subagents 0.4.1 starts its product in the original session directory.
 // Resolve from the active loader entry, including profiles with custom provider names.
-export function checkProductWorkspace(ctx, provider, parent, cwd) {
-  if (!parent || !cwd || sameProjectDirectory(parent.session?.header?.cwd || process.cwd(), cwd))
-    return;
+export function isCommunityRelay(ctx, provider) {
   if (!provider?.prepareContinuable || productEntries(ctx).has(provider.name)) return;
   const pkg = 'dsh-plugin-product-subagents';
   for (const entry of ctx.get('loader')?.entries?.() ?? []) {
@@ -51,12 +49,21 @@ export function checkProductWorkspace(ctx, provider, parent, cwd) {
     } catch {
       /* A custom loader can omit the package location. */
     }
-    if (version && version !== '0.4.1') continue;
+    if (!version || version === '0.4.1') return true;
+  }
+  return false;
+}
+export function checkProductWorkspace(ctx, provider, parent, cwd) {
+  if (
+    parent &&
+    cwd &&
+    !sameProjectDirectory(parent.session?.header?.cwd || process.cwd(), cwd) &&
+    isCommunityRelay(ctx, provider)
+  )
     throw new Error(
       provider.name +
         ' 无法确认会在切换后的工作目录执行。请在目标目录新建聊天，或改用支持切换目录的 DSH 后端。',
     );
-  }
 }
 
 export function developmentRestriction(entry) {

@@ -176,6 +176,8 @@ async function execute(
               },
           {
             cwd: trial.cwd,
+            requestId: trial.requestId,
+            previewToken: args[1],
             onStarted(receipt, ready) {
               trials.set(args[1], {
                 sessionId: agent.id,
@@ -351,7 +353,7 @@ export function apply(ctx, config = {}) {
             result = {
               ok: false,
               error: {
-                code: 'sihq/invalid',
+                code: error.code === 'sihq/preview-unavailable' ? error.code : 'sihq/invalid',
                 message: error.message,
                 details: {},
               },

@@ -579,7 +579,8 @@ export function installRunHistory(ctx, call) {
           result ?? { kind: 'success', text: '已收到后台任务回执' },
           receipt ?? {},
         );
-        if (receipt?.jobId && !receipt.flowId && !receipt.error) view.trackingToken = plan.token;
+        if (receipt?.jobId && !receipt.flowId && !receipt.error && !receipt.historyOnly)
+          view.trackingToken = plan.token;
         if (view.flowId) openDetail(sessionId, view.flowId, 0, view.jobId);
         else showReceipt(sessionId, view);
       }
@@ -602,6 +603,12 @@ export function installRunHistory(ctx, call) {
           .filter(Boolean)
           .join('\n'),
       };
+    if (receipt.historyOnly)
+      return {
+        ...result,
+        jobId: receipt.jobId,
+        text: '已提交 DSH 后台任务 ' + receipt.jobId + '。请在 Jobs 或本会话运行记录中查看进度。',
+      };
     return { ...result, ...receipt };
   }
   function Receipt({ sessionId }) {
@@ -620,7 +627,8 @@ export function installRunHistory(ctx, call) {
           });
           if (!active) return;
           if (receipt.flowId) openDetail(sessionId, receipt.flowId, 0, receipt.jobId);
-          else if (receipt.error) showReceipt(sessionId, launchView(accepted, receipt));
+          else if (receipt.error || receipt.historyOnly)
+            showReceipt(sessionId, launchView(accepted, receipt));
           else timer = setTimeout(poll, 2000);
         } catch (e) {
           if (active)
